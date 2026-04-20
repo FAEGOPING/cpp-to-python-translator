@@ -1,0 +1,11 @@
+# Python
+__pycache__/
+*.pyc
+.envrm -rf .git
+git init
+
+# env
+.env
+
+# mac
+.DS_Store
