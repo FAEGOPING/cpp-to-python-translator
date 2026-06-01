@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.pyc
+
+# API Keys
+.env
+
+# macOS
+.DS_Store
+
+# Generated files
+translated/
+
+# Experiment outputs
+experiment_results.csv
+summary_results.csv
