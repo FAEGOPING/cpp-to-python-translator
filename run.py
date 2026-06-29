@@ -9,13 +9,21 @@ Supports:
   - Functional Equivalence  (output comparison with original C++)
   - Iterative Self-Repair   (LLM feedback loop)
   - Experiment Logging      (per-round + summary CSV)
+  - Multi-Test Validation   (multiple .in/.out pairs)
+  - Differential Testing    (C++ vs Python per test case)
+  - Automatic Test Generation (random, boundary, edge, heuristic, LLM)
+  - Execution Result Caching  (avoids duplicate runs)
+  - C++ Binary Compilation Cache (compile once, execute many)
+  - Enhanced Repair Prompts   (error categories, history, smart failure selection)
+  - Extended Experiment Logging (timing per phase, test counts, error details)
 
 Workflow:
   C++ Source → LLM Translation → Compile Check → Runtime Check
-  → Functional Validation → Self-Repair → Repeat (max N rounds)
+  → Functional Validation (all test cases) → Self-Repair → Repeat (max N rounds)
 
 Author: Research-Grade Translation Framework
 Python: 3.10+
+Version: 2.1
 """
 
 from __future__ import annotations
@@ -25,32 +33,72 @@ import os
 import subprocess
 import tempfile
 import time
-from typing import Any
+from typing import List, Optional, Tuple
 
 from gpt_api import call_gpt
 
-# ============================================================================
-# Configuration
-# ============================================================================
-
-PROJECT_ROOT: str = "/Users/tianjabez/Desktop/project"
-
-MAX_REPAIR_ROUNDS: int = 5
-"""Maximum number of repair iterations per program."""
-
-EXECUTION_TIMEOUT: int = 10
-"""Timeout in seconds for subprocess execution (C++ and Python)."""
-
-SAMPLES_DIR: str = os.path.join(PROJECT_ROOT, "samples")
-TRANSLATED_DIR: str = os.path.join(PROJECT_ROOT, "translated")
-CSV_FILE: str = os.path.join(PROJECT_ROOT, "experiment_results.csv")
-SUMMARY_CSV: str = os.path.join(PROJECT_ROOT, "summary_results.csv")
-
-os.makedirs(TRANSLATED_DIR, exist_ok=True)
-os.makedirs(SAMPLES_DIR, exist_ok=True)
+# Framework modules
+from config import Config, DEFAULT_CONFIG, _resolve_legacy
+from cache import ExecutionCache, CppBinaryCache
+from test_generator import TestGenerator, TestCase
+from differential_testing import (
+    run_differential_tests,
+    DiffReport,
+)
 
 # ============================================================================
-# Utility: test input loading
+# Configuration — defaults reproduce original behaviour exactly
+# ============================================================================
+
+_active_config: Config | None = None
+
+
+def get_config() -> Config:
+    """Return the active (possibly user-overridden) configuration.
+
+    By default this is :data:`DEFAULT_CONFIG`.  Users may call
+    :func:`set_config` before :func:`main` to customise the run.
+
+    Returns:
+        The active :class:`Config` instance.
+    """
+    global _active_config
+    if _active_config is None:
+        _active_config = _resolve_legacy()
+    return _active_config
+
+
+def set_config(cfg: Config) -> None:
+    """Replace the active configuration (call before :func:`main`).
+
+    Args:
+        cfg: The :class:`Config` instance to use for all subsequent
+            pipeline operations.
+    """
+    global _active_config
+    _active_config = cfg
+
+
+def _cfg() -> Config:
+    """Convenience: return the active config."""
+    return get_config()
+
+
+# ============================================================================
+# C++ binary compilation cache (compile once, execute many)
+# ============================================================================
+
+_cpp_bin_cache: CppBinaryCache = CppBinaryCache()
+"""Module-level cache so each C++ file is compiled once per run."""
+
+
+def _cleanup_cpp_cache() -> None:
+    """Remove all cached C++ binaries.  Called at end of main()."""
+    _cpp_bin_cache.cleanup()
+
+
+# ============================================================================
+# Utility: test input loading (original — preserved)
 # ============================================================================
 
 def load_test_input(cpp_file: str) -> str:
@@ -68,13 +116,88 @@ def load_test_input(cpp_file: str) -> str:
     """
     in_path = os.path.splitext(cpp_file)[0] + ".in"
     if os.path.isfile(in_path):
-        with open(in_path, encoding="utf-8") as fh:
-            return fh.read()
+        try:
+            with open(in_path, encoding="utf-8") as fh:
+                return fh.read()
+        except (OSError, UnicodeDecodeError):
+            return ""
     return ""
 
 
 # ============================================================================
-# Utility: error classification
+# Utility: multi-test loading (extends single-test behaviour)
+# ============================================================================
+
+def load_test_cases(cpp_file: str) -> List[TestCase]:
+    """Discover all test cases for *cpp_file*.
+
+    Supports two modes:
+
+    **Mode A — Numbered files (preferred):**
+        ``example_1.in``, ``example_1.out``,
+        ``example_2.in``, ``example_2.out``, ...
+
+    **Mode B — Single ``.in`` (legacy):**
+        ``example.in`` — used as the sole test case.  When an
+        ``example.out`` file also exists its content is used as the
+        expected output; otherwise the C++ program's output at runtime
+        serves as the oracle.
+
+    Args:
+        cpp_file: Absolute path to a ``.cpp`` source file.
+
+    Returns:
+        List of ``(input_text, expected_output_or_None)`` pairs.
+        ``None`` for expected output means "use C++ execution as oracle".
+    """
+    base = os.path.splitext(cpp_file)[0]
+    cases: list[TestCase] = []
+
+    # Mode A: numbered files  example_1.in, example_2.in, ...
+    idx = 1
+    while True:
+        in_path = f"{base}_{idx}.in"
+        out_path = f"{base}_{idx}.out"
+        if os.path.isfile(in_path):
+            try:
+                with open(in_path, encoding="utf-8") as fh:
+                    inp = fh.read()
+            except (OSError, UnicodeDecodeError):
+                idx += 1
+                continue
+            expected: str | None = None
+            if os.path.isfile(out_path):
+                try:
+                    with open(out_path, encoding="utf-8") as fh:
+                        expected = fh.read()
+                except (OSError, UnicodeDecodeError):
+                    expected = None
+            cases.append((inp, expected))
+            idx += 1
+        else:
+            break
+
+    if cases:
+        return cases
+
+    # Mode B: legacy single .in file
+    inp = load_test_input(cpp_file)
+    out_path = base + ".out"
+    expected = None
+    if os.path.isfile(out_path):
+        try:
+            with open(out_path, encoding="utf-8") as fh:
+                expected = fh.read()
+        except (OSError, UnicodeDecodeError):
+            expected = None
+
+    # Always return at least one case (even with empty input)
+    cases.append((inp, expected))
+    return cases
+
+
+# ============================================================================
+# Utility: error classification (original — preserved)
 # ============================================================================
 
 _KNOWN_PYTHON_ERRORS: tuple[str, ...] = (
@@ -124,14 +247,53 @@ def _classify_error(error_text: str | None) -> str:
 
 
 # ============================================================================
+# Utility: error category (maps errors to broad categories)
+# ============================================================================
+
+def _classify_error_category(error_type: str) -> str:
+    """Map a concrete error type to a broad category for the repair prompt.
+
+    Args:
+        error_type: Classified error name (e.g. ``"SyntaxError"``).
+
+    Returns:
+        One of ``"syntax"``, ``"runtime"``, ``"semantic"``,
+        ``"timeout"``, or ``"unknown"``.
+    """
+    syntax_errors = {
+        "SyntaxError", "IndentationError", "TabError",
+    }
+    runtime_errors = {
+        "NameError", "TypeError", "ValueError", "IndexError",
+        "KeyError", "AttributeError", "ImportError",
+        "ModuleNotFoundError", "ZeroDivisionError", "RecursionError",
+        "RuntimeError", "FileNotFoundError", "OSError", "MemoryError",
+        "OverflowError", "UnboundLocalError", "StopIteration",
+        "AssertionError", "EOFError",
+    }
+
+    if error_type in syntax_errors:
+        return "syntax"
+    if error_type in runtime_errors:
+        return "runtime"
+    if error_type == "FunctionalMismatch":
+        return "semantic"
+    if error_type == "Timeout":
+        return "timeout"
+    return "unknown"
+
+
+# ============================================================================
 # C++ compilation & execution
 # ============================================================================
 
 def run_cpp(cpp_file: str, test_input: str) -> tuple[bool, str]:
     """Compile and execute a C++ program, capturing its stdout.
 
-    The C++ source is compiled with ``g++ -std=c++17`` into a temporary
-    executable, then executed with *test_input* piped to stdin.
+    Uses an internal compilation cache so the C++ source is compiled
+    **once** and the resulting executable is reused for every test
+    case.  The cache is invalidated automatically when the source file
+    changes.
 
     Args:
         cpp_file: Path to the ``.cpp`` source file.
@@ -142,56 +304,44 @@ def run_cpp(cpp_file: str, test_input: str) -> tuple[bool, str]:
         is the program's stdout; on failure it is a human-readable
         error message.
     """
-    exe_fd, exe_path = tempfile.mkstemp(suffix=".out")
-    os.close(exe_fd)
+    cfg = _cfg()
 
+    # -- get or compile the binary (cached) ----------------------------------
+    ok, exe_path_or_err = _cpp_bin_cache.get_or_compile(
+        cpp_file, timeout=cfg.execution_timeout
+    )
+
+    if not ok:
+        return False, exe_path_or_err
+
+    exe_path = exe_path_or_err
+
+    # -- run the binary ------------------------------------------------------
     try:
-        # -- compile ---------------------------------------------------------
-        compile_result = subprocess.run(
-            ["g++", "-std=c++17", cpp_file, "-o", exe_path],
-            capture_output=True,
-            text=True,
-            timeout=EXECUTION_TIMEOUT,
-        )
-
-        if compile_result.returncode != 0:
-            return False, (
-                f"C++ compilation failed:\n{compile_result.stderr.strip()}"
-            )
-
-        # -- run -------------------------------------------------------------
         run_result = subprocess.run(
             [exe_path],
             input=test_input,
             capture_output=True,
             text=True,
-            timeout=EXECUTION_TIMEOUT,
+            timeout=cfg.execution_timeout,
         )
 
-        # Merge stderr into output when present (non-zero exit usually
-        # means a runtime crash).
         if run_result.returncode != 0:
             err = run_result.stderr.strip() or "(no stderr)"
-            return False, f"C++ runtime error (exit {run_result.returncode}):\n{err}"
+            return False, (
+                f"C++ runtime error (exit {run_result.returncode}):\n{err}"
+            )
 
         return True, run_result.stdout
 
     except subprocess.TimeoutExpired:
-        return False, f"Timeout: C++ execution exceeded {EXECUTION_TIMEOUT}s"
-    except FileNotFoundError:
         return False, (
-            "g++ not found — please install g++ to enable "
-            "C++ compilation and functional validation."
+            f"Timeout: C++ execution exceeded {cfg.execution_timeout}s"
         )
-    finally:
-        try:
-            os.remove(exe_path)
-        except OSError:
-            pass
 
 
 # ============================================================================
-# Translation prompt
+# Translation prompt (original — preserved)
 # ============================================================================
 
 def translate_cpp(cpp_code: str) -> str:
@@ -222,7 +372,7 @@ C++ Code:
 
 
 # ============================================================================
-# Repair prompt
+# Repair prompt (extended — original params preserved, new optional params)
 # ============================================================================
 
 def fix_code(
@@ -232,8 +382,19 @@ def fix_code(
     compile_error: str | None = None,
     runtime_error: str | None = None,
     functional_mismatch: str | None = None,
+    error_category: str | None = None,
+    failed_test_inputs: str | None = None,
+    expected_outputs: str | None = None,
+    actual_outputs: str | None = None,
+    repair_history: str | None = None,
+    previous_repair_count: int = 0,
 ) -> str:
     """Repair translated Python code, providing full error context to the LLM.
+
+    The prompt is enriched with error categories, representative failed
+    test inputs, and repair history to help the model focus on the
+    right fix strategy.  When many test cases fail, only the most
+    representative failures are included to avoid excessive prompt size.
 
     Args:
         cpp_code: Original C++ source (ground truth).
@@ -241,6 +402,13 @@ def fix_code(
         compile_error: Compilation error message, if any.
         runtime_error: Runtime error message, if any.
         functional_mismatch: Output difference description, if any.
+        error_category: Broad category hint — ``"syntax"``, ``"runtime"``,
+            or ``"semantic"``.  Helps the model focus its repair strategy.
+        failed_test_inputs: String representation of inputs that failed.
+        expected_outputs: Expected outputs for failed tests.
+        actual_outputs: Actual outputs produced for failed tests.
+        repair_history: Summary of previous repair attempts.
+        previous_repair_count: Number of repair attempts so far.
 
     Returns:
         LLM-generated repaired Python source code.
@@ -261,17 +429,75 @@ def fix_code(
             f"**Functional Mismatch:**\n```\n{functional_mismatch}\n```"
         )
 
+    # Extended context
+    if failed_test_inputs:
+        error_sections.append(
+            f"**Failed Test Input(s):**\n```\n{failed_test_inputs}\n```"
+        )
+    if expected_outputs:
+        error_sections.append(
+            f"**Expected Output:**\n```\n{expected_outputs}\n```"
+        )
+    if actual_outputs:
+        error_sections.append(
+            f"**Actual Output:**\n```\n{actual_outputs}\n```"
+        )
+
     error_block = "\n\n".join(error_sections) if error_sections else (
         "(No specific error details available — please review the code "
         "for semantic discrepancies.)"
     )
 
-    prompt = f"""\
-You are an expert software engineer specialised in C++ → Python translation.
+    # Build the prompt -------------------------------------------------------
+    prompt_parts: list[str] = [
+        "You are an expert software engineer specialised in C++ → Python "
+        "translation.",
+    ]
 
-The Python code below was translated from C++, but it contains errors or
-produces incorrect output.
+    # Error category guidance
+    if error_category:
+        category_hints = {
+            "syntax": (
+                "The issue is a **syntax / compilation error**. "
+                "Focus on Python grammar, indentation, missing colons, "
+                "unmatched brackets, or malformed statements."
+            ),
+            "runtime": (
+                "The issue is a **runtime error**. "
+                "Focus on variable name typos, type mismatches, missing "
+                "imports, index/Key errors, or incorrect API usage."
+            ),
+            "semantic": (
+                "The issue is a **semantic / logic error**. "
+                "The program runs but produces incorrect output. "
+                "Compare your logic carefully against the C++ original."
+            ),
+            "timeout": (
+                "The issue is a **timeout**. "
+                "The program likely has an infinite loop or is too slow. "
+                "Check loop termination conditions."
+            ),
+        }
+        hint = category_hints.get(
+            error_category,
+            f"The issue category is **{error_category}**.",
+        )
+        prompt_parts.append(hint)
 
+    # Repair history
+    if repair_history:
+        prompt_parts.append(
+            f"**Previous Repair Attempts:**\n{repair_history}"
+        )
+    if previous_repair_count > 0:
+        prompt_parts.append(
+            f"This is repair attempt #{previous_repair_count + 1}. "
+            f"Previous attempts did not resolve all issues — please try "
+            f"a different approach this time."
+        )
+
+    prompt_parts.append(
+        f"""\
 ============================================================================
 Original C++ Code (ground truth):
 ============================================================================
@@ -295,12 +521,13 @@ Requirements:
 2. Fix **all** identified issues.
 3. Return **only** the corrected Python code.
 4. Do **not** include explanations, markdown fences, or comments."""
+    )
 
-    return call_gpt(prompt)
+    return call_gpt("\n\n".join(prompt_parts))
 
 
 # ============================================================================
-# Compilation check
+# Compilation check (original — preserved)
 # ============================================================================
 
 def check_compile(code: str) -> tuple[bool, str | None]:
@@ -313,11 +540,14 @@ def check_compile(code: str) -> tuple[bool, str | None]:
         ``(passed, error_or_none)`` — *error_or_none* is the compiler
         stderr on failure, ``None`` on success.
     """
-    with tempfile.NamedTemporaryFile(
-        suffix=".py", mode="w", delete=False
-    ) as fh:
-        fh.write(code)
-        file_path = fh.name
+    fd, file_path = tempfile.mkstemp(suffix=".py")
+    os.close(fd)
+    try:
+        with open(file_path, "w", encoding="utf-8") as fh:
+            fh.write(code)
+    except OSError:
+        _try_remove(file_path)
+        return False, "Failed to write temporary Python file for compilation check"
 
     try:
         result = subprocess.run(
@@ -331,14 +561,11 @@ def check_compile(code: str) -> tuple[bool, str | None]:
 
         return True, None
     finally:
-        try:
-            os.remove(file_path)
-        except OSError:
-            pass
+        _try_remove(file_path)
 
 
 # ============================================================================
-# Runtime execution
+# Runtime execution (original — preserved)
 # ============================================================================
 
 def run_python(code: str, test_input: str) -> tuple[bool, str]:
@@ -352,11 +579,14 @@ def run_python(code: str, test_input: str) -> tuple[bool, str]:
         ``(success, output_or_error)`` — on success *output_or_error*
         is stdout; on failure it is a classified error message.
     """
-    with tempfile.NamedTemporaryFile(
-        suffix=".py", mode="w", delete=False
-    ) as fh:
-        fh.write(code)
-        file_path = fh.name
+    fd, file_path = tempfile.mkstemp(suffix=".py")
+    os.close(fd)
+    try:
+        with open(file_path, "w", encoding="utf-8") as fh:
+            fh.write(code)
+    except OSError:
+        _try_remove(file_path)
+        return False, "[OSError] Failed to write temporary Python file"
 
     try:
         result = subprocess.run(
@@ -364,7 +594,7 @@ def run_python(code: str, test_input: str) -> tuple[bool, str]:
             input=test_input,
             capture_output=True,
             text=True,
-            timeout=EXECUTION_TIMEOUT,
+            timeout=_cfg().execution_timeout,
         )
 
         if result.returncode != 0:
@@ -376,17 +606,14 @@ def run_python(code: str, test_input: str) -> tuple[bool, str]:
 
     except subprocess.TimeoutExpired:
         return False, (
-            f"[Timeout] Execution exceeded {EXECUTION_TIMEOUT} seconds"
+            f"[Timeout] Execution exceeded {_cfg().execution_timeout} seconds"
         )
     finally:
-        try:
-            os.remove(file_path)
-        except OSError:
-            pass
+        _try_remove(file_path)
 
 
 # ============================================================================
-# Functional equivalence validation
+# Functional equivalence validation (original — preserved)
 # ============================================================================
 
 def validate_translation(
@@ -413,7 +640,7 @@ def validate_translation(
           ``"C++_EXECUTION_FAILED:"`` when the C++ program itself could
           not be run.
     """
-    # --- run original C++ ---------------------------------------------------
+    # -- run original C++ ---------------------------------------------------
     cpp_ok, cpp_result = run_cpp(cpp_file, test_input)
     if not cpp_ok:
         return (
@@ -423,7 +650,7 @@ def validate_translation(
             f"C++_EXECUTION_FAILED: {cpp_result}",
         )
 
-    # --- run translated Python ----------------------------------------------
+    # -- run translated Python ----------------------------------------------
     py_ok, py_result = run_python(python_code, test_input)
     if not py_ok:
         return (
@@ -433,7 +660,7 @@ def validate_translation(
             f"Python execution failed: {py_result}",
         )
 
-    # --- compare outputs ----------------------------------------------------
+    # -- compare outputs ----------------------------------------------------
     cpp_output = cpp_result.strip()
     python_output = py_result.strip()
 
@@ -449,7 +676,43 @@ def validate_translation(
 
 
 # ============================================================================
-# File output
+# Multi-test validation (differential testing wrapper)
+# ============================================================================
+
+def validate_translation_multi(
+    cpp_file: str,
+    python_code: str,
+    test_cases: List[TestCase],
+    cache: ExecutionCache | None = None,
+) -> DiffReport:
+    """Run differential testing across all *test_cases*.
+
+    Runs every test case through both the C++ oracle and the translated
+    Python program, comparing outputs individually.  The translation
+    passes only when **all** test cases produce identical output.
+
+    Args:
+        cpp_file: Path to the original C++ source.
+        python_code: Translated Python source code.
+        test_cases: List of ``(input, expected_output_or_None)`` pairs.
+        cache: Optional execution cache for avoiding duplicate runs.
+
+    Returns:
+        :class:`DiffReport` with per-test results and aggregate
+        statistics.
+    """
+    return run_differential_tests(
+        cpp_file=cpp_file,
+        python_code=python_code,
+        test_cases=test_cases,
+        run_cpp_fn=run_cpp,
+        run_python_fn=run_python,
+        cache=cache,
+    )
+
+
+# ============================================================================
+# File output (original — preserved)
 # ============================================================================
 
 def save_code(program_name: str, code: str) -> None:
@@ -460,14 +723,18 @@ def save_code(program_name: str, code: str) -> None:
         code: Python source code to persist.
     """
     out_name = program_name.replace(".cpp", ".py")
-    out_path = os.path.join(TRANSLATED_DIR, out_name)
+    out_path = os.path.join(_cfg().translated_dir, out_name)
 
-    with open(out_path, "w", encoding="utf-8") as fh:
-        fh.write(code)
+    try:
+        with open(out_path, "w", encoding="utf-8") as fh:
+            fh.write(code)
+    except OSError:
+        # Best-effort — don't crash the pipeline over file output
+        pass
 
 
 # ============================================================================
-# Per-round experiment log
+# Per-round experiment log (extended — original params preserved)
 # ============================================================================
 
 _EXPERIMENT_HEADER = [
@@ -481,6 +748,23 @@ _EXPERIMENT_HEADER = [
     "RepairCount",
 ]
 
+# Extended columns — appended only when extended_logging is True
+_EXPERIMENT_HEADER_EXTENDED = [
+    "TranslationTime",
+    "CompileTime",
+    "RuntimeTime",
+    "ValidationTime",
+    "RepairTime",
+    "LLMResponseTime",
+    "GeneratedTestCount",
+    "ExecutedTestCount",
+    "PassedTestCount",
+    "SuccessRate",
+    "FailureReason",
+    "FinalErrorType",
+    "TotalRepairAttempts",
+]
+
 
 def log_result(
     program: str,
@@ -492,33 +776,100 @@ def log_result(
     error_type: str,
     elapsed_time: float,
     repair_count: int,
+    translation_time: float | None = None,
+    compile_time: float | None = None,
+    runtime_time: float | None = None,
+    validation_time: float | None = None,
+    repair_time: float | None = None,
+    llm_response_time: float | None = None,
+    generated_test_count: int | None = None,
+    executed_test_count: int | None = None,
+    passed_test_count: int | None = None,
+    success_rate: float | None = None,
+    failure_reason: str | None = None,
+    final_error_type: str | None = None,
+    total_repair_attempts: int | None = None,
 ) -> None:
     """Append one row to the detailed experiment CSV.
 
     Creates the file with the correct header when it does not yet exist.
+    When ``extended_logging`` is enabled in the active config, additional
+    columns are appended (old columns remain in their original positions).
+
+    Args:
+        program: Program name (e.g. ``"example.cpp"``).
+        round_num: Current repair round (0-indexed).
+        compile_pass: Whether ``py_compile`` succeeded.
+        runtime_pass: Whether Python execution succeeded.
+        functional_pass: Whether outputs matched the C++ oracle.
+        error_type: Classified error name or ``"None"``.
+        elapsed_time: Total elapsed seconds since start.
+        repair_count: Number of repair attempts so far.
+        translation_time: Time spent in LLM translation (seconds).
+        compile_time: Time spent in ``py_compile`` check.
+        runtime_time: Time spent in Python execution.
+        validation_time: Time spent in functional validation.
+        repair_time: Time spent in LLM repair call.
+        llm_response_time: Wall-clock time for the LLM API call.
+        generated_test_count: Number of auto-generated test cases.
+        executed_test_count: Total test cases executed.
+        passed_test_count: Number of test cases that passed.
+        success_rate: ``passed / executed`` ratio.
+        failure_reason: Human-readable failure description.
+        final_error_type: Error type after all repairs exhausted.
+        total_repair_attempts: Cumulative repair attempts.
     """
-    file_exists = os.path.isfile(CSV_FILE)
+    csv_path = _cfg().csv_file
+    file_exists = os.path.isfile(csv_path)
+    use_extended = _cfg().extended_logging
 
-    with open(CSV_FILE, mode="a", newline="", encoding="utf-8") as fh:
-        writer = csv.writer(fh)
+    header = list(_EXPERIMENT_HEADER)
+    if use_extended:
+        header.extend(_EXPERIMENT_HEADER_EXTENDED)
 
-        if not file_exists:
-            writer.writerow(_EXPERIMENT_HEADER)
+    try:
+        with open(csv_path, mode="a", newline="", encoding="utf-8") as fh:
+            writer = csv.writer(fh)
 
-        writer.writerow([
-            program,
-            round_num,
-            compile_pass,
-            runtime_pass,
-            functional_pass,
-            error_type,
-            round(elapsed_time, 2),
-            repair_count,
-        ])
+            if not file_exists:
+                writer.writerow(header)
+
+            base_row = [
+                program,
+                round_num,
+                compile_pass,
+                runtime_pass,
+                functional_pass,
+                error_type,
+                round(elapsed_time, 2),
+                repair_count,
+            ]
+
+            if use_extended:
+                base_row.extend([
+                    round(translation_time, 4) if translation_time is not None else "",
+                    round(compile_time, 4) if compile_time is not None else "",
+                    round(runtime_time, 4) if runtime_time is not None else "",
+                    round(validation_time, 4) if validation_time is not None else "",
+                    round(repair_time, 4) if repair_time is not None else "",
+                    round(llm_response_time, 4) if llm_response_time is not None else "",
+                    generated_test_count if generated_test_count is not None else "",
+                    executed_test_count if executed_test_count is not None else "",
+                    passed_test_count if passed_test_count is not None else "",
+                    round(success_rate, 4) if success_rate is not None else "",
+                    failure_reason or "",
+                    final_error_type or "",
+                    total_repair_attempts if total_repair_attempts is not None else "",
+                ])
+
+            writer.writerow(base_row)
+    except OSError:
+        # Logging is best-effort — don't crash the pipeline
+        pass
 
 
 # ============================================================================
-# Summary log (one row per program)
+# Summary log (extended — original params preserved)
 # ============================================================================
 
 _SUMMARY_HEADER = [
@@ -531,6 +882,20 @@ _SUMMARY_HEADER = [
     "TotalTime",
 ]
 
+# Extended summary columns
+_SUMMARY_HEADER_EXTENDED = [
+    "TranslationTime",
+    "ValidationTime",
+    "AvgRepairTime",
+    "GeneratedTestCount",
+    "ExecutedTestCount",
+    "PassedTestCount",
+    "SuccessRate",
+    "FinalErrorType",
+    "ErrorCategory",
+    "TotalRepairAttempts",
+]
+
 
 def log_summary(
     program: str,
@@ -541,28 +906,85 @@ def log_summary(
     functional_pass: bool,
     repair_rounds: int,
     total_time: float,
+    translation_time: float | None = None,
+    validation_time: float | None = None,
+    avg_repair_time: float | None = None,
+    generated_test_count: int | None = None,
+    executed_test_count: int | None = None,
+    passed_test_count: int | None = None,
+    success_rate: float | None = None,
+    final_error_type: str | None = None,
+    error_category: str | None = None,
+    total_repair_attempts: int | None = None,
 ) -> None:
     """Append one summary row per program.
 
     Creates the file with the correct header when it does not yet exist.
+    When ``extended_logging`` is enabled in the active config, additional
+    columns are appended (old columns remain in their original positions).
+
+    Args:
+        program: Program name.
+        initial_compile_pass: Whether the very first translation compiled.
+        final_compile_pass: Whether the final version compiled.
+        runtime_pass: Whether runtime execution succeeded.
+        functional_pass: Whether functional equivalence was achieved.
+        repair_rounds: Number of repair rounds used.
+        total_time: Total elapsed seconds.
+        translation_time: Total time spent in LLM translation.
+        validation_time: Total time spent in validation.
+        avg_repair_time: Average time per repair round.
+        generated_test_count: Number of auto-generated tests.
+        executed_test_count: Total tests executed.
+        passed_test_count: Tests that passed.
+        success_rate: Fraction of tests passed.
+        final_error_type: Error type after all repairs.
+        error_category: Broad error category.
+        total_repair_attempts: Cumulative repair attempts.
     """
-    file_exists = os.path.isfile(SUMMARY_CSV)
+    summary_path = _cfg().summary_csv
+    file_exists = os.path.isfile(summary_path)
+    use_extended = _cfg().extended_logging
 
-    with open(SUMMARY_CSV, mode="a", newline="", encoding="utf-8") as fh:
-        writer = csv.writer(fh)
+    header = list(_SUMMARY_HEADER)
+    if use_extended:
+        header.extend(_SUMMARY_HEADER_EXTENDED)
 
-        if not file_exists:
-            writer.writerow(_SUMMARY_HEADER)
+    try:
+        with open(summary_path, mode="a", newline="", encoding="utf-8") as fh:
+            writer = csv.writer(fh)
 
-        writer.writerow([
-            program,
-            initial_compile_pass,
-            final_compile_pass,
-            runtime_pass,
-            functional_pass,
-            repair_rounds,
-            round(total_time, 2),
-        ])
+            if not file_exists:
+                writer.writerow(header)
+
+            base_row = [
+                program,
+                initial_compile_pass,
+                final_compile_pass,
+                runtime_pass,
+                functional_pass,
+                repair_rounds,
+                round(total_time, 2),
+            ]
+
+            if use_extended:
+                base_row.extend([
+                    round(translation_time, 4) if translation_time is not None else "",
+                    round(validation_time, 4) if validation_time is not None else "",
+                    round(avg_repair_time, 4) if avg_repair_time is not None else "",
+                    generated_test_count if generated_test_count is not None else "",
+                    executed_test_count if executed_test_count is not None else "",
+                    passed_test_count if passed_test_count is not None else "",
+                    round(success_rate, 4) if success_rate is not None else "",
+                    final_error_type or "",
+                    error_category or "",
+                    total_repair_attempts if total_repair_attempts is not None else "",
+                ])
+
+            writer.writerow(base_row)
+    except OSError:
+        # Logging is best-effort — don't crash the pipeline
+        pass
 
 
 # ============================================================================
@@ -572,97 +994,245 @@ def log_summary(
 def process_program(program_path: str) -> None:
     """Run the full translation → validate → repair pipeline for one program.
 
+    Pipeline:
+        1. Load C++ source and discover test cases.
+        2. Optionally generate additional test cases.
+        3. Translate via LLM.
+        4. Loop (compile check → runtime check → differential validation
+           → smart repair) up to ``max_repair_rounds`` times.
+        5. Log per-round and summary results.
+
+    When only a single ``.in`` file is present and the config uses
+    ``validation_strategy="single"``, behaviour is **identical** to the
+    v1.0 pipeline.
+
     Args:
         program_path: Absolute path to a ``.cpp`` source file.
     """
+    cfg = _cfg()
     program_name = os.path.basename(program_path)
 
     print(f"\n{'=' * 60}")
     print(f"Processing: {program_name}")
     print(f"{'=' * 60}")
 
-    # -- load C++ source & test input ----------------------------------------
+    # -- load C++ source -----------------------------------------------------
     with open(program_path, encoding="utf-8") as fh:
         cpp_code = fh.read()
 
-    test_input = load_test_input(program_path)
-    if test_input:
-        print(f"  Test input loaded: {os.path.splitext(program_name)[0]}.in")
+    # -- load test cases -----------------------------------------------------
+    test_cases = load_test_cases(program_path)
+
+    if len(test_cases) > 1:
+        print(f"  Test cases loaded: {len(test_cases)}")
+        for i, (inp, exp) in enumerate(test_cases):
+            exp_note = " (with .out)" if exp is not None else ""
+            print(f"    [{i}] {os.path.splitext(program_name)[0]}_{i + 1}.in{exp_note}")
     else:
-        print("  (no .in file — using empty input)")
+        inp = test_cases[0][0] if test_cases else ""
+        if inp:
+            print(f"  Test input loaded: {os.path.splitext(program_name)[0]}.in")
+        else:
+            print("  (no .in file — using empty input)")
+
+    # -- optionally generate additional test cases ---------------------------
+    generated_cases: list[TestCase] = []
+    if cfg.auto_test and cfg.generated_cases > 0:
+        print(f"\n  Generating {cfg.generated_cases} test cases "
+              f"(strategies: {', '.join(cfg.test_strategies)}) …")
+        gen = TestGenerator()
+        llm_cb = call_gpt if "llm" in cfg.test_strategies else None
+        generated_cases = gen.generate(
+            program_path,
+            count=cfg.generated_cases,
+            strategies=cfg.test_strategies,
+            llm_callback=llm_cb,
+        )
+        print(f"  Generated {len(generated_cases)} test cases.")
+
+    # Combine manual + generated for differential testing
+    all_test_cases = test_cases + generated_cases
+    total_test_count = len(all_test_cases)
+
+    # -- execution cache -----------------------------------------------------
+    cache = ExecutionCache() if cfg.enable_caching else None
 
     # -- initial translation -------------------------------------------------
     start_time = time.time()
     print("\n  Generating initial translation …")
+    t0 = time.time()
     python_code = translate_cpp(cpp_code)
+    translation_time = time.time() - t0
 
     initial_compile_pass: bool = False
-    final_result_printed: bool = False
+    repair_history_entries: list[str] = []
+    last_error_type: str = "None"
+    last_error_category: str = "unknown"
 
     # -- repair loop ---------------------------------------------------------
-    for round_num in range(MAX_REPAIR_ROUNDS):
+    for round_num in range(cfg.max_repair_rounds):
         elapsed = time.time() - start_time
 
-        # 1. Compile check ---------------------------------------------------
+        # ---- 1. Compile check ----------------------------------------------
+        t0_c = time.time()
         compile_ok, compile_error = check_compile(python_code)
+        compile_time = time.time() - t0_c
 
         if round_num == 0:
             initial_compile_pass = compile_ok
 
         if not compile_ok:
-            print(f"\n  ❌ Round {round_num}: Compilation FAILED")
-            print(f"     Error: {_classify_error(compile_error)}")
+            err_type = _classify_error(compile_error)
+            err_cat = _classify_error_category(err_type)
+            last_error_type = err_type
+            last_error_category = err_cat
+
+            if cfg.verbose_output:
+                print(f"\n  ❌ Round {round_num}: Compilation FAILED")
+                print(f"     Error: {err_type}")
+                print(f"     Category: {err_cat}")
+
             log_result(
                 program_name,
                 round_num,
                 compile_pass=False,
                 runtime_pass=False,
                 functional_pass=False,
-                error_type=_classify_error(compile_error),
+                error_type=err_type,
                 elapsed_time=elapsed,
                 repair_count=round_num,
+                translation_time=translation_time if round_num == 0 else None,
+                compile_time=compile_time,
+                generated_test_count=len(generated_cases),
+                executed_test_count=total_test_count,
+                passed_test_count=0,
+                success_rate=0.0,
+                failure_reason=compile_error[:200] if compile_error else "",
+                final_error_type=err_type,
+                total_repair_attempts=round_num,
             )
+
+            # Repair
+            history = _format_repair_history(repair_history_entries)
             python_code = fix_code(
                 cpp_code,
                 python_code,
                 compile_error=compile_error,
+                error_category=err_cat,
+                repair_history=history,
+                previous_repair_count=round_num,
             )
+
+            repair_history_entries.append(
+                f"Round {round_num}: Compile error ({err_type}) — {err_cat}"
+            )
+            if cache:
+                cache.invalidate_python(python_code)
             continue
 
-        # 2. Runtime check ---------------------------------------------------
-        runtime_ok, runtime_output = run_python(python_code, test_input)
+        # ---- 2. Runtime check (single quick test first) --------------------
+        t0_r = time.time()
+        first_input = all_test_cases[0][0] if all_test_cases else ""
+        runtime_ok, runtime_output = run_python(python_code, first_input)
+        runtime_time = time.time() - t0_r
 
         if not runtime_ok:
-            print(f"\n  ❌ Round {round_num}: Runtime FAILED")
-            print(f"     {runtime_output[:120]}")
+            err_type = _classify_error(runtime_output)
+            err_cat = _classify_error_category(err_type)
+            last_error_type = err_type
+            last_error_category = err_cat
+
+            if cfg.verbose_output:
+                print(f"\n  ❌ Round {round_num}: Runtime FAILED")
+                print(f"     {runtime_output[:120]}")
+
             log_result(
                 program_name,
                 round_num,
                 compile_pass=True,
                 runtime_pass=False,
                 functional_pass=False,
-                error_type=_classify_error(runtime_output),
+                error_type=err_type,
                 elapsed_time=elapsed,
                 repair_count=round_num,
+                translation_time=translation_time if round_num == 0 else None,
+                compile_time=compile_time,
+                runtime_time=runtime_time,
+                generated_test_count=len(generated_cases),
+                executed_test_count=total_test_count,
+                passed_test_count=0,
+                success_rate=0.0,
+                failure_reason=runtime_output[:200],
+                final_error_type=err_type,
+                total_repair_attempts=round_num,
             )
+
+            history = _format_repair_history(repair_history_entries)
             python_code = fix_code(
                 cpp_code,
                 python_code,
                 runtime_error=runtime_output,
+                error_category=err_cat,
+                repair_history=history,
+                previous_repair_count=round_num,
             )
+            repair_history_entries.append(
+                f"Round {round_num}: Runtime error ({err_type}) — {err_cat}"
+            )
+            if cache:
+                cache.invalidate_python(python_code)
             continue
 
-        # 3. Functional equivalence check ------------------------------------
-        func_ok, cpp_out, py_out, mismatch = validate_translation(
-            program_path, python_code, test_input,
-        )
+        # ---- 3. Differential functional validation -------------------------
+        t0_v = time.time()
+
+        if cfg.validation_strategy == "differential" and total_test_count > 0:
+            report = validate_translation_multi(
+                program_path,
+                python_code,
+                all_test_cases,
+                cache=cache,
+            )
+            func_ok = report.all_passed
+            validation_time = time.time() - t0_v
+
+            if not func_ok:
+                mismatch = report.mismatch_report(max_cases=5)
+                compact = report.compact_failure_summary()
+                failed_tests = compact
+            else:
+                mismatch = ""
+                compact = ""
+                failed_tests = ""
+        else:
+            # Legacy single-test validation path
+            single_input = all_test_cases[0][0] if all_test_cases else ""
+            func_ok, cpp_out, py_out, mismatch = validate_translation(
+                program_path, python_code, single_input,
+            )
+            validation_time = time.time() - t0_v
+            report = None
+            compact = ""
+            failed_tests = (
+                f"input={single_input.strip()!r} | "
+                f"expected={cpp_out!r} | "
+                f"got={py_out!r}"
+                if not func_ok and not mismatch.startswith("C++_EXECUTION_FAILED:")
+                else ""
+            )
+            # Use local variables for the single-test path (avoids overwriting
+            # outer total_test_count and generated_cases)
+            _single_total = 1
+            _single_passed = 1 if func_ok else 0
 
         if not func_ok:
-            # Distinguish "C++ itself failed" from "real mismatch"
+            # Distinguish C++ oracle failure from real mismatch
             if mismatch.startswith("C++_EXECUTION_FAILED:"):
-                print(f"\n  ⚠️  Round {round_num}: Cannot validate — "
-                      f"C++ execution failed")
-                print(f"     {mismatch}")
+                if cfg.verbose_output:
+                    print(f"\n  ⚠️  Round {round_num}: Cannot validate — "
+                          f"C++ execution failed")
+                    print(f"     {mismatch}")
+
                 log_result(
                     program_name,
                     round_num,
@@ -672,9 +1242,21 @@ def process_program(program_path: str) -> None:
                     error_type="CppExecutionFailed",
                     elapsed_time=elapsed,
                     repair_count=round_num,
+                    translation_time=translation_time if round_num == 0 else None,
+                    compile_time=compile_time,
+                    runtime_time=runtime_time,
+                    validation_time=validation_time,
+                    generated_test_count=len(generated_cases),
+                    executed_test_count=total_test_count,
+                    passed_test_count=0,
+                    success_rate=0.0,
+                    failure_reason=mismatch[:200],
+                    final_error_type="CppExecutionFailed",
+                    total_repair_attempts=round_num,
                 )
                 # Cannot repair — the problem is in the C++ baseline.
                 save_code(program_name, python_code)
+
                 log_summary(
                     program_name,
                     initial_compile_pass=initial_compile_pass,
@@ -683,35 +1265,90 @@ def process_program(program_path: str) -> None:
                     functional_pass=False,
                     repair_rounds=round_num,
                     total_time=elapsed,
+                    translation_time=translation_time,
+                    validation_time=validation_time,
+                    generated_test_count=len(generated_cases),
+                    executed_test_count=total_test_count,
+                    passed_test_count=0,
+                    success_rate=0.0,
+                    final_error_type="CppExecutionFailed",
+                    error_category="unknown",
+                    total_repair_attempts=round_num,
                 )
-                final_result_printed = True
                 return
 
             # Genuine output mismatch — repair
-            print(f"\n  ❌ Round {round_num}: Functional MISMATCH")
-            print(f"     Expected: {cpp_out}")
-            print(f"     Got:      {py_out}")
+            err_type = "FunctionalMismatch"
+            err_cat = "semantic"
+            last_error_type = err_type
+            last_error_category = err_cat
+
+            if cfg.verbose_output:
+                print(f"\n  ❌ Round {round_num}: Functional MISMATCH")
+                if report is not None:
+                    print(f"     {report.summary}")
+
+            passed_count = report.passed if report is not None else _single_passed
+            sr = passed_count / max(total_test_count, 1)
+
             log_result(
                 program_name,
                 round_num,
                 compile_pass=True,
                 runtime_pass=True,
                 functional_pass=False,
-                error_type="FunctionalMismatch",
+                error_type=err_type,
                 elapsed_time=elapsed,
                 repair_count=round_num,
+                translation_time=translation_time if round_num == 0 else None,
+                compile_time=compile_time,
+                runtime_time=runtime_time,
+                validation_time=validation_time,
+                generated_test_count=len(generated_cases),
+                executed_test_count=total_test_count,
+                passed_test_count=passed_count,
+                success_rate=sr,
+                failure_reason=mismatch[:200] if mismatch else (compact[:200] if compact else ""),
+                final_error_type=err_type,
+                total_repair_attempts=round_num,
             )
+
+            # Enhanced repair with smart failure compression
+            history = _format_repair_history(repair_history_entries)
             python_code = fix_code(
                 cpp_code,
                 python_code,
-                functional_mismatch=mismatch,
+                functional_mismatch=mismatch if mismatch else compact,
+                error_category=err_cat,
+                failed_test_inputs=(
+                    _format_failed_inputs(report) if report else failed_tests
+                ),
+                expected_outputs=(
+                    _format_expected_outputs(report) if report else ""
+                ),
+                actual_outputs=(
+                    _format_actual_outputs(report) if report else ""
+                ),
+                repair_history=history,
+                previous_repair_count=round_num,
             )
+            repair_history_entries.append(
+                f"Round {round_num}: Functional mismatch — {err_cat} "
+                f"({passed_count}/{total_test_count} passed)"
+            )
+            if cache:
+                cache.invalidate_python(python_code)
             continue
 
-        # -- all three checks passed -----------------------------------------
+        # ---- all checks passed ---------------------------------------------
+        passed_count = report.passed if report is not None else _single_passed
+        sr = passed_count / max(total_test_count, 1)
+
         print(f"\n  ✅ Round {round_num}: ALL CHECKS PASSED")
-        print(f"     Compile ✓ | Runtime ✓ | Functional ✓")
+        print(f"     Compile ✓ | Runtime ✓ | Functional ✓ "
+              f"({passed_count}/{total_test_count} tests)")
         save_code(program_name, python_code)
+
         log_result(
             program_name,
             round_num,
@@ -721,7 +1358,19 @@ def process_program(program_path: str) -> None:
             error_type="None",
             elapsed_time=elapsed,
             repair_count=round_num,
+            translation_time=translation_time if round_num == 0 else None,
+            compile_time=compile_time,
+            runtime_time=runtime_time,
+            validation_time=validation_time,
+            generated_test_count=len(generated_cases),
+            executed_test_count=total_test_count,
+            passed_test_count=passed_count,
+            success_rate=sr,
+            failure_reason="",
+            final_error_type="None",
+            total_repair_attempts=round_num,
         )
+
         log_summary(
             program_name,
             initial_compile_pass=initial_compile_pass,
@@ -730,94 +1379,246 @@ def process_program(program_path: str) -> None:
             functional_pass=True,
             repair_rounds=round_num,
             total_time=elapsed,
+            translation_time=translation_time,
+            validation_time=validation_time,
+            generated_test_count=len(generated_cases),
+            executed_test_count=total_test_count,
+            passed_test_count=passed_count,
+            success_rate=sr,
+            final_error_type="None",
+            error_category="none",
+            total_repair_attempts=round_num,
         )
-        final_result_printed = True
         return
 
     # -- exhausted all repair rounds -----------------------------------------
     elapsed = time.time() - start_time
 
-    # Determine final state for summary
-    final_compile_ok, _ = check_compile(python_code)
+    # Determine final state (the loop always runs at least once, so
+    # *compile_ok* from the last iteration is still in scope)
+    final_compile_ok = compile_ok
     final_runtime_ok = False
     final_func_ok = False
+    final_passed = 0
 
     if final_compile_ok:
-        final_runtime_ok, _ = run_python(python_code, test_input)
+        first_input = all_test_cases[0][0] if all_test_cases else ""
+        final_runtime_ok, _ = run_python(python_code, first_input)
         if final_runtime_ok:
-            func_ok, _, _, mismatch = validate_translation(
-                program_path, python_code, test_input,
-            )
-            # Only count as functional-pass if it was a genuine match
-            # (not a C++ execution failure masking the result)
-            if func_ok:
-                final_func_ok = True
-            elif mismatch.startswith("C++_EXECUTION_FAILED:"):
-                final_func_ok = False
+            if cfg.validation_strategy == "differential" and total_test_count > 0:
+                final_report = validate_translation_multi(
+                    program_path, python_code, all_test_cases, cache=cache,
+                )
+                final_func_ok = final_report.all_passed
+                final_passed = final_report.passed
+            else:
+                func_ok, _, _, mismatch = validate_translation(
+                    program_path, python_code,
+                    all_test_cases[0][0] if all_test_cases else "",
+                )
+                if func_ok:
+                    final_func_ok = True
+                    final_passed = 1
+                elif mismatch.startswith("C++_EXECUTION_FAILED:"):
+                    final_func_ok = False
 
-    print(f"\n  ❌ Maximum repair rounds ({MAX_REPAIR_ROUNDS}) reached.")
+    final_sr = final_passed / max(total_test_count, 1)
+
+    print(f"\n  ❌ Maximum repair rounds ({cfg.max_repair_rounds}) reached.")
     save_code(program_name, python_code)
+
     log_result(
         program_name,
-        MAX_REPAIR_ROUNDS,
+        cfg.max_repair_rounds,
         compile_pass=final_compile_ok,
         runtime_pass=final_runtime_ok,
         functional_pass=final_func_ok,
         error_type="MaxRoundsExceeded",
         elapsed_time=elapsed,
-        repair_count=MAX_REPAIR_ROUNDS,
+        repair_count=cfg.max_repair_rounds,
+        translation_time=translation_time,
+        executed_test_count=total_test_count,
+        passed_test_count=final_passed,
+        success_rate=final_sr,
+        failure_reason=f"Exhausted {cfg.max_repair_rounds} repair rounds",
+        final_error_type=last_error_type,
+        total_repair_attempts=cfg.max_repair_rounds,
     )
+
     log_summary(
         program_name,
         initial_compile_pass=initial_compile_pass,
         final_compile_pass=final_compile_ok,
         runtime_pass=final_runtime_ok,
         functional_pass=final_func_ok,
-        repair_rounds=MAX_REPAIR_ROUNDS,
+        repair_rounds=cfg.max_repair_rounds,
         total_time=elapsed,
+        translation_time=translation_time,
+        generated_test_count=len(generated_cases),
+        executed_test_count=total_test_count,
+        passed_test_count=final_passed,
+        success_rate=final_sr,
+        final_error_type=last_error_type,
+        error_category=last_error_category,
+        total_repair_attempts=cfg.max_repair_rounds,
     )
-    final_result_printed = True
 
 
 # ============================================================================
-# Entry point
+# Internal helpers for repair context building
+# ============================================================================
+
+def _format_repair_history(entries: list[str]) -> str:
+    """Format repair history entries for inclusion in a prompt.
+
+    Only the last 10 entries are included to keep prompts manageable.
+
+    Args:
+        entries: Chronological list of repair attempt descriptions.
+
+    Returns:
+        Newline-separated history string, or ``""`` if empty.
+    """
+    if not entries:
+        return ""
+    return "\n".join(f"  - {e}" for e in entries[-10:])
+
+
+def _format_failed_inputs(report: DiffReport | None) -> str:
+    """Extract representative failed test inputs from a diff report.
+
+    Uses :func:`differential_testing._select_representative_failures`
+    under the hood (via ``compact_failure_summary``), so when many
+    tests fail only the most diagnostic ones are included.
+
+    Args:
+        report: A :class:`DiffReport` or ``None``.
+
+    Returns:
+        Formatted string of failed inputs, or ``""``.
+    """
+    if report is None:
+        return ""
+    failures = [r for r in report.test_results if not r.passed]
+    parts: list[str] = []
+    for r in failures[:8]:
+        parts.append(f"Test {r.test_index}: {r.test_input.strip()!r}")
+    return "\n".join(parts)
+
+
+def _format_expected_outputs(report: DiffReport | None) -> str:
+    """Extract expected outputs from a diff report.
+
+    Only the first 8 failures are included to keep prompts concise.
+
+    Args:
+        report: A :class:`DiffReport` or ``None``.
+
+    Returns:
+        Formatted string of expected outputs, or ``""``.
+    """
+    if report is None:
+        return ""
+    failures = [r for r in report.test_results if not r.passed]
+    parts: list[str] = []
+    for r in failures[:8]:
+        parts.append(f"Test {r.test_index}: {r.expected_output!r}")
+    return "\n".join(parts)
+
+
+def _format_actual_outputs(report: DiffReport | None) -> str:
+    """Extract actual outputs from a diff report.
+
+    Only the first 8 failures are included to keep prompts concise.
+
+    Args:
+        report: A :class:`DiffReport` or ``None``.
+
+    Returns:
+        Formatted string of actual outputs, or ``""``.
+    """
+    if report is None:
+        return ""
+    failures = [r for r in report.test_results if not r.passed]
+    parts: list[str] = []
+    for r in failures[:8]:
+        parts.append(f"Test {r.test_index}: {r.actual_output!r}")
+    return "\n".join(parts)
+
+
+def _try_remove(path: str) -> None:
+    """Remove a file, silently ignoring errors.
+
+    Args:
+        path: Filesystem path to remove.
+    """
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+# ============================================================================
+# Entry point (original — preserved)
 # ============================================================================
 
 def main() -> None:
-    """Discover all ``.cpp`` files under ``samples/`` and process each one."""
-    cpp_files = sorted([
-        os.path.join(SAMPLES_DIR, f)
-        for f in os.listdir(SAMPLES_DIR)
-        if f.endswith(".cpp")
-    ])
+    """Discover all ``.cpp`` files under ``samples/`` and process each one.
+
+    Runs the full translation → validation → repair pipeline for every
+    ``.cpp`` file found.  Handles individual program failures gracefully
+    so one broken program does not abort the entire batch.
+    """
+    cfg = _cfg()
+
+    try:
+        cpp_files = sorted([
+            os.path.join(cfg.samples_dir, f)
+            for f in os.listdir(cfg.samples_dir)
+            if f.endswith(".cpp")
+        ])
+    except FileNotFoundError:
+        print(f"\n  ⚠️  Samples directory not found: {cfg.samples_dir}")
+        print("     Create it and add C++ source files to begin.\n")
+        return
+    except OSError as exc:
+        print(f"\n  ⚠️  Cannot read samples directory: {exc}\n")
+        return
 
     print(f"\n{'=' * 60}")
     print(f"Research-Grade C++ → Python Translation Framework")
     print(f"{'=' * 60}")
-    print(f"  Samples dir    : {SAMPLES_DIR}")
-    print(f"  Translated dir : {TRANSLATED_DIR}")
-    print(f"  Max rounds     : {MAX_REPAIR_ROUNDS}")
-    print(f"  Timeout        : {EXECUTION_TIMEOUT}s")
+    print(f"  Samples dir    : {cfg.samples_dir}")
+    print(f"  Translated dir : {cfg.translated_dir}")
+    print(f"  Max rounds     : {cfg.max_repair_rounds}")
+    print(f"  Timeout        : {cfg.execution_timeout}s")
+    print(f"  Auto-test      : {cfg.auto_test}")
+    print(f"  Validation     : {cfg.validation_strategy}")
+    print(f"  Caching        : {cfg.enable_caching}")
     print(f"  C++ files found: {len(cpp_files)}")
 
     if not cpp_files:
-        print(f"\n  ⚠️  No .cpp files found in {SAMPLES_DIR}")
+        print(f"\n  ⚠️  No .cpp files found in {cfg.samples_dir}")
         print("     Add C++ source files to the samples/ directory.\n")
         return
 
-    for cpp_file in cpp_files:
-        try:
-            process_program(cpp_file)
-        except Exception as exc:
-            print(f"\n  💥 Unexpected error processing "
-                  f"{os.path.basename(cpp_file)}: {exc}")
-            # Continue with the next program — don't abort the whole batch.
+    try:
+        for cpp_file in cpp_files:
+            try:
+                process_program(cpp_file)
+            except Exception as exc:
+                print(f"\n  💥 Unexpected error processing "
+                      f"{os.path.basename(cpp_file)}: {exc}")
+                # Continue with the next program — don't abort the whole batch.
+    finally:
+        # Best-effort cleanup of cached C++ binaries
+        _cleanup_cpp_cache()
 
     print(f"\n{'=' * 60}")
     print("Experiment completed.")
-    print(f"  Detailed log : {CSV_FILE}")
-    print(f"  Summary log  : {SUMMARY_CSV}")
-    print(f"  Translations : {TRANSLATED_DIR}/")
+    print(f"  Detailed log : {cfg.csv_file}")
+    print(f"  Summary log  : {cfg.summary_csv}")
+    print(f"  Translations : {cfg.translated_dir}/")
     print(f"{'=' * 60}\n")
 
 
