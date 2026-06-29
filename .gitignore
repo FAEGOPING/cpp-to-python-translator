@@ -17,3 +17,14 @@ summary_results.csv
 analysis_report.csv
 analysis_report.txt
 *.bak
+
+# Dataset Manager — generated outputs (keep .gitkeep for directory structure)
+dataset_manager/raw_cpp/**
+!dataset_manager/raw_cpp/.gitkeep
+dataset_manager/benchmark_dataset/**
+!dataset_manager/benchmark_dataset/.gitkeep
+dataset_manager/reports/**
+!dataset_manager/reports/.gitkeep
+dataset_manager/logs/**
+!dataset_manager/logs/.gitkeep
+dataset_manager/__pycache__/
