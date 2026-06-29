@@ -93,6 +93,7 @@ _STAGES: list[tuple[str, str, str]] = [
     ("compile",   "Compile Validation",    "dataset_manager.validate_cpp"),
     ("metadata",  "Generate Metadata",     "dataset_manager.metadata_generator"),
     ("build",     "Build Benchmark Dataset", "dataset_manager.build_dataset"),
+    ("map",       "Source Mapping",        "dataset_manager.map_sources"),
 ]
 
 

@@ -2,8 +2,8 @@
 dataset_manager/scan_repositories.py — Repository Scanner
 ==========================================================
 
-Recursively scans ``~/datasets/`` and generates a statistical summary:
-repository counts, file-type counts, size distribution, directory tree.
+Recursively scans ``~/datasets/`` and generates comprehensive
+per-repository statistics.
 
 Outputs:
     ``reports/repository_statistics.csv``
@@ -20,195 +20,212 @@ _DEPS = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
 if _DEPS not in _sys.path:
     _sys.path.insert(0, _DEPS)
 
-
 import os
 import sys
-from typing import List
+from typing import Any, Dict, List
 
 from dataset_manager.utils import (
     DATASETS_DIR,
     REPORTS_DIR,
+    LOGS_DIR,
     Logger,
+    count_lines,
+    git_last_commit,
+    git_remote_url,
     write_csv,
 )
 
 
-# ============================================================================
-# Scanner helpers
-# ============================================================================
+# File extensions considered C++ source or header
+_CPP_EXTS = (".cpp", ".cc", ".cxx")
+_HDR_EXTS = (".h", ".hpp", ".hxx")
 
-def _scan_directory(root: str, logger: Logger) -> dict:
-    """Recursively scan *root* and return aggregate statistics.
+
+def _scan_one_repo(repo_dir: str, dataset_source: str) -> Dict[str, Any]:
+    """Scan a single repository directory and return statistics.
 
     Args:
-        root: The directory to scan.
-        logger: :class:`Logger` instance.
+        repo_dir: Path to the repository root.
+        dataset_source: Dataset category name (e.g. ``"algorithms"``).
 
     Returns:
-        Dict with keys ``repo_count``, ``cpp_count``, ``h_count``,
-        ``readme_count``, ``other_count``, ``total_size_mb``,
-        ``max_depth``.
+        Dict of stat name → value.
     """
-    stats: dict[str, int | float] = {
-        "repo_count": 0,
-        "cpp_count": 0,
-        "h_count": 0,
-        "readme_count": 0,
-        "other_count": 0,
-        "total_size_mb": 0.0,
-        "max_depth": 0,
-    }
+    repo_name = os.path.basename(repo_dir)
+    cpp_files: list[str] = []
+    hdr_files: list[str] = []
+    readme_found = False
     total_bytes: int = 0
+    total_loc: int = 0
+    max_loc: int = 0
 
-    for dirpath, dirnames, filenames in os.walk(root):
-        # Skip .git directories
-        if ".git" in dirpath.split(os.sep):
-            continue
-
-        # Track repository roots (directories containing .git/)
-        git_dir = os.path.join(dirpath, ".git")
-        if os.path.isdir(git_dir):
-            stats["repo_count"] += 1
-
-        # Depth
-        rel_depth = dirpath[len(root):].count(os.sep)
-        if rel_depth > stats["max_depth"]:
-            stats["max_depth"] = rel_depth
+    for dirpath, dirnames, filenames in os.walk(repo_dir):
+        # Skip .git
+        dirnames[:] = [d for d in dirnames if d != ".git"]
 
         for fname in filenames:
             fpath = os.path.join(dirpath, fname)
 
-            # File size
             try:
                 total_bytes += os.path.getsize(fpath)
             except OSError:
                 pass
 
-            # File type classification
-            if fname.endswith(".cpp") or fname.endswith(".cc") or fname.endswith(".cxx"):
-                stats["cpp_count"] += 1
-            elif fname.endswith(".h") or fname.endswith(".hpp") or fname.endswith(".hxx"):
-                stats["h_count"] += 1
-            elif fname.upper().startswith("README"):
-                stats["readme_count"] += 1
-            else:
-                stats["other_count"] += 1
+            if fname.upper().startswith("README"):
+                readme_found = True
 
-    stats["total_size_mb"] = round(total_bytes / (1024 * 1024), 2)
-    return stats
+            if fname.lower().endswith(_CPP_EXTS):
+                cpp_files.append(fpath)
+                try:
+                    with open(fpath, encoding="utf-8", errors="replace") as fh:
+                        source = fh.read()
+                    loc = count_lines(source)["code"]
+                    total_loc += loc
+                    if loc > max_loc:
+                        max_loc = loc
+                except OSError:
+                    pass
+
+            elif fname.lower().endswith(_HDR_EXTS):
+                hdr_files.append(fpath)
+
+    n_cpp = len(cpp_files)
+    return {
+        "repository_name": repo_name,
+        "repository_owner": _guess_owner(repo_dir),
+        "repository_url": git_remote_url(repo_dir),
+        "dataset_source": dataset_source,
+        "repository_size_mb": round(total_bytes / (1024 * 1024), 2),
+        "cpp_files": n_cpp,
+        "header_files": len(hdr_files),
+        "total_loc": total_loc,
+        "average_loc": round(total_loc / max(n_cpp, 1), 1),
+        "maximum_loc": max_loc,
+        "readme_exists": readme_found,
+        "last_commit": git_last_commit(repo_dir),
+    }
 
 
-def _per_category_scan(root: str, logger: Logger) -> List[dict]:
-    """Scan each category subdirectory individually.
+def _guess_owner(repo_dir: str) -> str:
+    """Guess the repository owner from the git remote URL.
 
     Args:
-        root: The ``datasets/`` directory containing category subdirs.
+        repo_dir: Path to a git repository.
+
+    Returns:
+        Owner name string, or ``"unknown"``.
+    """
+    url = git_remote_url(repo_dir)
+    if url == "unknown":
+        return "unknown"
+    # Extract owner from GitHub URL: https://github.com/OWNER/REPO
+    for part in url.split("/"):
+        if part and not part.startswith("http") and "github" not in part and "." not in part:
+            return part
+    return "unknown"
+
+
+def _scan_all(logger: Logger) -> List[Dict[str, Any]]:
+    """Scan every repository under ``~/datasets/``.
+
+    Args:
         logger: :class:`Logger` instance.
 
     Returns:
-        List of per-category statistics dicts.
+        List of per-repository statistics dicts.
     """
     results: list[dict] = []
     try:
-        entries = sorted(os.listdir(root))
+        categories = sorted(os.listdir(DATASETS_DIR))
     except OSError:
-        logger.error(f"Cannot list directory: {root}")
+        logger.error(f"Cannot list {DATASETS_DIR}")
         return results
 
-    for entry in entries:
-        cat_path = os.path.join(root, entry)
+    for category in categories:
+        cat_path = os.path.join(DATASETS_DIR, category)
         if not os.path.isdir(cat_path):
             continue
 
-        logger.info(f"Scanning category: {entry}")
-        stats = _scan_directory(cat_path, logger)
-        stats["category"] = entry
-        results.append(stats)
+        try:
+            repos = sorted(os.listdir(cat_path))
+        except OSError:
+            continue
 
+        for repo in repos:
+            repo_dir = os.path.join(cat_path, repo)
+            if not os.path.isdir(repo_dir):
+                continue
+
+            logger.info(f"Scanning: {category}/{repo}")
+            try:
+                stats = _scan_one_repo(repo_dir, category)
+                results.append(stats)
+            except Exception as exc:
+                logger.error(f"Failed to scan {category}/{repo}: {exc}")
+                continue
+
+    logger.count("repositories_scanned", len(results))
     return results
 
 
-# ============================================================================
-# Report generation
-# ============================================================================
+def _build_csv_rows(stats_list: List[Dict[str, Any]]) -> List[List[Any]]:
+    """Convert stats dicts to CSV rows.
 
-def _build_report(per_category: List[dict], overall: dict) -> list[list[str]]:
-    """Build CSV rows from scan statistics.
+    Uses the same keys as those in :func:`_scan_one_repo`'s return dict.
 
     Args:
-        per_category: Per-category stats.
-        overall: Aggregate stats.
+        stats_list: List of per-repo stats.
 
     Returns:
-        List of rows for CSV output.
+        Row list suitable for :func:`write_csv`.
     """
-    rows: list[list[str]] = []
-    for cat in per_category:
-        rows.append([
-            cat.get("category", "unknown"),
-            str(cat.get("repo_count", 0)),
-            str(cat.get("cpp_count", 0)),
-            str(cat.get("h_count", 0)),
-            str(cat.get("readme_count", 0)),
-            str(cat.get("other_count", 0)),
-            str(cat.get("total_size_mb", 0)),
-            str(cat.get("max_depth", 0)),
-        ])
-    # Add total row
-    rows.append([
-        "TOTAL",
-        str(overall.get("repo_count", 0)),
-        str(overall.get("cpp_count", 0)),
-        str(overall.get("h_count", 0)),
-        str(overall.get("readme_count", 0)),
-        str(overall.get("other_count", 0)),
-        str(overall.get("total_size_mb", 0)),
-        str(overall.get("max_depth", 0)),
-    ])
+    # These must match the keys in _scan_one_repo's return dict
+    keys = [
+        "repository_name", "repository_owner", "repository_url",
+        "dataset_source", "repository_size_mb", "cpp_files", "header_files",
+        "total_loc", "average_loc", "maximum_loc", "readme_exists",
+        "last_commit",
+    ]
+    rows: list[list] = []
+    for s in stats_list:
+        rows.append([s.get(k, "") for k in keys])
     return rows
 
 
-# ============================================================================
-# Main entry point
-# ============================================================================
-
 def main() -> None:
-    """Scan ``~/datasets/`` and write ``repository_statistics.csv``."""
+    """Scan all repositories and write ``repository_statistics.csv``."""
     logger = Logger("scan_repositories")
 
     if not os.path.isdir(DATASETS_DIR):
         logger.error(f"Datasets directory not found: {DATASETS_DIR}")
-        logger.info("Clone repositories first: python dataset_manager/clone_repositories.py")
         sys.exit(1)
 
     logger.info(f"Scanning: {DATASETS_DIR}")
 
-    # Overall scan
-    logger.info("Running overall scan …")
-    overall = _scan_directory(DATASETS_DIR, logger)
+    stats = _scan_all(logger)
+    logger.info(f"Scan complete: {len(stats)} repositories")
 
-    # Per-category scan
-    per_category = _per_category_scan(DATASETS_DIR, logger)
+    # Print aggregate summary
+    total_cpp = sum(s["cpp_files"] for s in stats)
+    total_loc = sum(s["total_loc"] for s in stats)
+    total_mb = sum(s["repository_size_mb"] for s in stats)
+    logger.info(f"  Total .cpp files: {total_cpp}")
+    logger.info(f"  Total LOC:        {total_loc}")
+    logger.info(f"  Total size:       {total_mb:.1f} MB")
 
-    logger.info(
-        f"Scan complete: {overall['repo_count']} repos, "
-        f"{overall['cpp_count']} .cpp files, "
-        f"{overall['total_size_mb']} MB"
-    )
-
-    # Write report
-    rows = _build_report(per_category, overall)
+    rows = _build_csv_rows(stats)
     report_path = os.path.join(REPORTS_DIR, "repository_statistics.csv")
     write_csv(
         report_path,
         [
-            "Category", "Repositories", "CPPFiles", "HeaderFiles",
-            "ReadmeFiles", "OtherFiles", "TotalSizeMB", "MaxDepth",
+            "RepositoryName", "RepositoryOwner", "RepositoryURL",
+            "DatasetSource", "RepositorySizeMB", "CppFiles", "HeaderFiles",
+            "TotalLOC", "AverageLOC", "MaximumLOC", "ReadmeExists",
+            "LastCommit",
         ],
         rows,
     )
     logger.info(f"Report written: {report_path}")
-
     print(f"\n{logger.summary()}")
 
 
