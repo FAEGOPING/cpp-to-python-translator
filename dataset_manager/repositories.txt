@@ -1,0 +1,22 @@
+# Dataset Repositories
+# =====================
+# One repository URL per line.
+# Lines starting with '#' are comments and are ignored.
+# Empty lines are skipped.
+#
+# Example:
+#   https://github.com/user/repo.git
+#
+# Add your algorithm / competitive-programming dataset repositories below.
+
+algorithms  https://github.com/TheAlgorithms/C-Plus-Plus.git
+
+codeforces  https://github.com/AmanZishan/Codeforces-Problem-Solved.git
+
+codeforces  https://github.com/gh0St-henry/Competitive-Programming.git
+
+codeforces  https://github.com/arafat2811/ProblemSolving.git
+
+codeforces  https://github.com/arafat2811/Striver-SDE-Sheet-Challenge.git
+
+cses        https://github.com/topics12/CSES-Solutions.git
