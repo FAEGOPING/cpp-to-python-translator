@@ -206,8 +206,9 @@ _COMPILE_HEADER = [
 
 
 def main() -> None:
-    """Compile all unique files and write ``compile_report.csv``."""
+    """Compile all executable unique files and write ``compile_report.csv``."""
     from dataset_manager.deduplicate import get_unique_files
+    from dataset_manager.filter_programs import get_executable_files
 
     logger = Logger("validate_cpp")
 
@@ -215,17 +216,28 @@ def main() -> None:
         logger.error(f"raw_cpp/ not found: {RAW_CPP_DIR}")
         sys.exit(1)
 
-    unique = sorted(get_unique_files())
-    if not unique:
-        logger.error("No unique C++ files found.")
+    # Only validate executable programs (filtered)
+    executable = get_executable_files(RAW_CPP_DIR, logger)
+    if not executable:
+        logger.error("No executable C++ files found. Run filtering first.")
         sys.exit(1)
 
-    logger.info(f"Unique files to validate: {len(unique)}")
+    logger.info(f"Executable files found: {len(executable)}")
+
+    # Intersect with unique files (post-dedup)
+    unique = get_unique_files() if os.path.isdir(RAW_CPP_DIR) else set()
+    candidates = sorted(executable & unique) if unique else sorted(executable)
+
+    if not candidates:
+        logger.error("No executable unique files found.")
+        sys.exit(1)
+
+    logger.info(f"Unique executable files to validate: {len(candidates)}")
     logger.info("Compiling with g++ -std=c++17 -w …")
 
-    passed, failed, _, rows = _compile_all(unique, logger)
+    passed, failed, _, rows = _compile_all(candidates, logger)
 
-    compile_rate = len(passed) / max(len(unique), 1) * 100
+    compile_rate = len(passed) / max(len(candidates), 1) * 100
     logger.info(
         f"Compile validation complete: "
         f"{len(passed)} passed, {len(failed)} failed "

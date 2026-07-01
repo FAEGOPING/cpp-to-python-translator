@@ -1,4 +1,4 @@
-# C++ → Python Translation Research Platform (v2.2)
+# C++ → Python Translation Research Platform (v2.3)
 
 ## Overview
 
@@ -139,6 +139,7 @@ python dataset_manager/map_sources.py
 |-------|--------|-------------|
 | Scan | `scan_repositories.py` | Repository statistics (owner, size, LOC, commits) |
 | Extract | `extract_cpp.py` | Copy .cpp files preserving directory mapping |
+| Filter | `filter_programs.py` | Detect executables, exclude libraries/tests/deps |
 | Deduplicate | `deduplicate.py` | SHA-256 content deduplication |
 | Compile | `validate_cpp.py` | g++ compile validation + diagnostics |
 | Metadata | `metadata_generator.py` | LOC, complexity, STL usage, patterns |
@@ -156,6 +157,10 @@ python dataset_manager/map_sources.py
 |------|----------|
 | `repository_statistics.csv` | Per-repo: owner, URL, size, LOC, commits |
 | `extraction_report.csv` | Files copied / skipped / failed |
+| `filter_report.csv` | Executable / library / test / dependency breakdown |
+| `library_files.csv` | Excluded library-only files |
+| `test_files.csv` | Excluded test-framework files |
+| `dependency_report.csv` | Files with missing local headers |
 | `duplicate_report.csv` | All duplicates with SHA-256 |
 | `dedup_summary.csv` | Unique vs duplicate ratio |
 | `compile_report.csv` | Per-file: status, time, warnings, errors, return code |
@@ -170,6 +175,7 @@ python dataset_manager/map_sources.py
 | `dataset_distribution.png/.pdf` | Programs per dataset source |
 | `repository_distribution.png/.pdf` | Top repositories by program count |
 | `loc_histogram.png/.pdf` | Lines of code distribution |
+| `filter_distribution.png/.pdf` | Program classification (executable/library/test/dep) |
 | `compile_success.png/.pdf` | Compile pass/fail pie chart |
 | `translation_success.png/.pdf` | Success rate at each pipeline stage |
 | `repair_distribution.png/.pdf` | Repair iterations per program |
@@ -189,6 +195,19 @@ Timestamped per-module log files with counters, warnings, errors, and timing.
 - Iterative self-repair with smart prompt compression
 - Error category classification (syntax / runtime / semantic)
 - Execution caching (compile once, execute many)
+
+### Dataset Filtering (v2.3)
+- **Executable program detection** — analyses every C++ file for `main()` entry points
+  (supports `int main()`, `int main(void)`, `signed main()`, `void main()`,
+  `int main(int argc, char* argv[])`)
+- **Library exclusion** — files without `main()` are classified as libraries and excluded
+- **Test framework detection** — identifies Google Test, Catch2, doctest,
+  Boost.Test, and benchmark files
+- **Dependency detection** — flags files with unresolvable local `#include "..."` headers
+- **Comment stripping** — removes comments and string literals before analysis
+  to avoid false positives
+- **Results**: on 9,743 raw C++ files, 8,721 (89.5%) are executable programs;
+  the benchmark dataset contains only compilable standalone programs.
 
 ### Dataset Manager
 - Automated Git repository cloning
