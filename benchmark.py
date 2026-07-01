@@ -41,6 +41,7 @@ from dataset_manager.utils import (
     Logger,
     timestamp,
     memory_usage_mb,
+    get_compiler,
 )
 
 # ============================================================================
@@ -223,6 +224,19 @@ def run_pipeline(
     logger.info(f"Started:  {timestamp()}")
     logger.info(f"Limit:    {limit or 'all'}")
     logger.info(f"Translate: {not skip_translation}")
+
+    # Compiler information
+    try:
+        compiler = get_compiler()
+        logger.info("-" * 70)
+        logger.info("Compiler:")
+        logger.info(f"  Name:       {compiler['name']}")
+        logger.info(f"  Version:    {compiler['version']}")
+        logger.info(f"  Executable: {compiler['executable']}")
+        logger.info(f"  Standard:   C++{compiler['standard'].replace('c++', '')}")
+        logger.info("-" * 70)
+    except Exception:
+        logger.warn("Compiler detection failed — compile validation may not work")
 
     # Determine which stages to run
     if stage_filter:

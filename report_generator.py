@@ -29,6 +29,7 @@ from dataset_manager.utils import (
     Logger,
     read_csv,
     timestamp,
+    get_compiler,
 )
 
 
@@ -162,6 +163,20 @@ def generate_report(output_path: str | None = None, logger: Logger | None = None
     lines.append(f"**Generated:** {timestamp()}")
     lines.append(f"**Experiment:** LLM-Based C++ → Python Translation with Iterative Repair")
     lines.append("")
+
+    # Compiler information
+    try:
+        compiler = get_compiler()
+        lines.append("### Compiler Environment")
+        lines.append("")
+        lines.append(f"| Setting | Value |")
+        lines.append(f"|---------|-------|")
+        lines.append(f"| Compiler | {compiler['name']} |")
+        lines.append(f"| Executable | `{compiler['executable']}` |")
+        lines.append(f"| C++ Standard | C++{compiler['standard'].replace('c++', '')} |")
+        lines.append("")
+    except Exception:
+        pass
 
     # -- 1. Dataset Summary --------------------------------------------------
     lines.append("-" * 70)

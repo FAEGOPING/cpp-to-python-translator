@@ -225,7 +225,48 @@ Timestamped per-module log files with counters, warnings, errors, and timing.
 - Automatic Markdown research report
 - Comprehensive logging with per-stage timing and memory usage
 
+## Compiler Detection (v2.3.2)
+
+The pipeline **automatically detects** the best available C++ compiler:
+
+| Priority | Compiler | Notes |
+|----------|----------|-------|
+| 1 | `g++-16` | GNU GCC 16 (Homebrew) |
+| 2 | `g++-15` | GNU GCC 15 |
+| 3 | `g++-14` | GNU GCC 14 |
+| 4 | `g++-13` | GNU GCC 13 |
+| 5 | `g++` | System GNU GCC |
+| Fallback | `clang++` | Apple Clang (macOS) |
+
+**Why GNU GCC is preferred:** Apple Clang does not support GCC-specific headers
+such as `#include <bits/stdc++.h>` used in competitive programming. The pipeline
+automatically selects GNU GCC when available via Homebrew, ensuring maximum
+compile compatibility with real-world C++ datasets.
+
+The detected compiler (name, version, executable path, C++ standard) is:
+- Logged at the start of every `benchmark.py` run
+- Recorded in every row of `compile_report.csv`
+- Included in the generated research `report.md`
+
+This guarantees **full reproducibility** for dissertation experiments.
+
 ## Research Contributions
+
+This platform supports the following research evaluation:
+
+1. **LLM-assisted C++ → Python translation** with compiler feedback
+2. **Iterative self-repair** with error-category-aware prompting
+3. **Differential testing** as a validation strategy
+4. **Automatic test generation** for translation quality assessment
+5. **Large-scale automated benchmarking** across diverse repositories
+6. **Statistical analysis** of translation and repair effectiveness
+
+## Requirements
+
+- Python 3.10+
+- C++ compiler (GNU GCC recommended, automatically detected)
+- DeepSeek API key (for LLM translation)
+- Git (for repository cloning)
 
 This platform supports the following research evaluation:
 
