@@ -40,6 +40,7 @@ from dataset_manager.utils import (
     Logger,
     run_command_full,
     write_csv,
+    get_compiler,
 )
 
 
@@ -103,8 +104,8 @@ def _get_compile_dir(original_path: str) -> str:
 def _compile_one_full(
     raw_cpp_file: str,
     timeout: int = 30,
-) -> Tuple[bool, str, str, float, int, int, int, str, str, str]:
-    """Compile a single C++ file using its **original** repository path.
+) -> Tuple[bool, str, str, float, int, int, int, str, str, str, str, str, str, str]:
+    """Compile a single C++ file using the **detected** C++ compiler.
 
     Maps ``raw_cpp_file`` to its original location under
     ``~/datasets/``, then compiles from that file's parent directory
@@ -117,16 +118,18 @@ def _compile_one_full(
     Returns:
         ``(passed, stderr, stdout, elapsed, warning_count,
         error_count, return_code, original_path, compile_dir,
-        compiler_command)``.
+        compiler_command, compiler_name, compiler_version,
+        compiler_executable, compiler_standard)``.
     """
     original_path = _raw_to_original(raw_cpp_file)
     compile_dir = _get_compile_dir(original_path)
+    compiler = get_compiler()
 
     fd, exe_path = tempfile.mkstemp(suffix=".out")
     os.close(fd)
 
-    # Compile using the ORIGINAL file path from its own directory
-    compile_cmd = ["g++", "-std=c++17", "-w", "-o", exe_path, original_path]
+    # Compile using the detected compiler from the original file's directory
+    compile_cmd = [compiler["executable"], "-std=c++17", "-w", "-o", exe_path, original_path]
 
     rc, stdout, stderr, elapsed = run_command_full(
         compile_cmd,
@@ -147,7 +150,9 @@ def _compile_one_full(
 
     return (passed, stderr.strip(), stdout.strip(), elapsed,
             warn_count, error_count, rc,
-            original_path, compile_dir, cmd_str)
+            original_path, compile_dir, cmd_str,
+            compiler["name"], compiler["version"],
+            compiler["executable"], compiler["standard"])
 
 
 # ============================================================================
@@ -181,7 +186,8 @@ def _compile_all(
     total = len(files)
     for i, raw_cpp_file in enumerate(files):
         (ok, stderr, stdout, elapsed, warns, errs, rc,
-         original_path, compile_dir, cmd_str) = \
+         original_path, compile_dir, cmd_str,
+         compiler_name, compiler_ver, compiler_exe, compiler_std) = \
             _compile_one_full(raw_cpp_file, timeout=timeout)
 
         # Use raw_cpp path for reporting (consistent with other stages)
@@ -200,6 +206,10 @@ def _compile_all(
             original_path,          # OriginalPath
             compile_dir,            # CompileDirectory
             cmd_str,                # CompilerCommand
+            compiler_name,          # Compiler
+            compiler_ver,           # CompilerVersion
+            compiler_exe,           # CompilerExecutable
+            compiler_std,           # CompilerStandard
         ])
 
         # Track compile time keyed by raw_cpp path (downstream consumers
@@ -253,7 +263,8 @@ def get_compilable_files(
 
     passed: list[str] = []
     for raw_cpp_file in file_list:
-        ok, _, _, _, _, _, _, _, _, _ = _compile_one_full(raw_cpp_file, timeout=timeout)
+        (ok, _, _, _, _, _, _, _, _, _, _, _, _, _) = \
+            _compile_one_full(raw_cpp_file, timeout=timeout)
         if ok:
             passed.append(raw_cpp_file)
     return passed
@@ -290,7 +301,7 @@ def get_compilable_files_with_times(
     total = len(file_list)
 
     for i, raw_cpp_file in enumerate(file_list):
-        ok, _, _, elapsed, _, _, _, _, _, _ = \
+        (ok, _, _, elapsed, _, _, _, _, _, _, _, _, _, _) = \
             _compile_one_full(raw_cpp_file, timeout=timeout)
         times[raw_cpp_file] = elapsed
         if ok:
@@ -309,6 +320,7 @@ _COMPILE_HEADER = [
     "File", "Status", "CompileTimeSeconds", "Stderr",
     "Stdout", "WarningCount", "ErrorCount", "ReturnCode",
     "OriginalPath", "CompileDirectory", "CompilerCommand",
+    "Compiler", "CompilerVersion", "CompilerExecutable", "CompilerStandard",
 ]
 
 
@@ -340,8 +352,16 @@ def main() -> None:
         logger.error("No executable unique files found.")
         sys.exit(1)
 
+    # Log compiler information
+    compiler = get_compiler()
+    logger.info(f"Compiler:")
+    logger.info(f"  Name:       {compiler['name']}")
+    logger.info(f"  Executable: {compiler['executable']}")
+    logger.info(f"  Standard:   C++{compiler['standard'].replace('c++', '')}")
+
     logger.info(f"Unique executable files to validate: {len(candidates)}")
-    logger.info("Compiling with g++ -std=c++17 from original repo directories …")
+    logger.info(f"Compiling with {compiler['executable']} -std=c++17 "
+                f"from original repo directories …")
 
     passed, failed, _, rows = _compile_all(candidates, logger)
 

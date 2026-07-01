@@ -528,6 +528,114 @@ def git_remote_url(repo_path: str) -> str:
 
 
 # ============================================================================
+# Compiler detection
+# ============================================================================
+
+# GNU compiler candidates in priority order
+_GNU_CANDIDATES: tuple[str, ...] = (
+    "g++-16", "g++-15", "g++-14", "g++-13", "g++-12",
+    "g++-11", "g++-10", "g++",
+)
+"""GNU compiler executables to search for, in priority order."""
+
+_FALLBACK_CANDIDATES: tuple[str, ...] = ("clang++", "c++")
+"""Fallback compilers when no GNU compiler is found."""
+
+
+def detect_compiler() -> Dict[str, str]:
+    """Detect the best available C++ compiler.
+
+    Searches for GNU compilers first (g++-16, g++-15, ..., g++),
+    then falls back to clang++.  Uses ``shutil.which()`` for
+    cross-platform detection.
+
+    Returns:
+        Dict with keys:
+            ``name`` — human-readable compiler name (e.g. ``"GNU GCC 16.2.0"``)
+            ``version`` — version string (e.g. ``"16.2.0"``)
+            ``executable`` — path to the compiler binary
+            ``standard`` — ``"c++17"``
+            ``flags`` — space-separated standard flags
+
+    Raises:
+        RuntimeError: If no C++ compiler can be found.
+    """
+    import shutil
+
+    executable: str | None = None
+
+    # 1. Search for GNU compilers
+    for candidate in _GNU_CANDIDATES:
+        found = shutil.which(candidate)
+        if found is not None:
+            executable = found
+            break
+
+    # 2. Fallback to clang++
+    if executable is None:
+        for candidate in _FALLBACK_CANDIDATES:
+            found = shutil.which(candidate)
+            if found is not None:
+                executable = found
+                break
+
+    if executable is None:
+        raise RuntimeError(
+            "No C++ compiler found on PATH.  Install g++ (GNU GCC) "
+            "or clang++ to enable compile validation."
+        )
+
+    # Identify the compiler
+    ok, stdout, _ = run_command(
+        [executable, "--version"],
+        timeout=10,
+    )
+    first_line = stdout.split("\n")[0].strip() if ok else executable
+
+    # Classify
+    if "gcc" in first_line.lower() or "g++" in first_line.lower():
+        # Extract version: "g++-16 (Homebrew GCC 16.2.0) ..." → "16.2.0"
+        import re
+        ver_match = re.search(r'(\d+\.\d+\.\d+)', first_line)
+        version = ver_match.group(1) if ver_match else "unknown"
+        name = f"GNU GCC {version}"
+        if "Homebrew" in first_line:
+            name = f"GNU GCC {version} (Homebrew)"
+    elif "clang" in first_line.lower():
+        import re
+        ver_match = re.search(r'clang[^ ]* (\d+\.\d+\.\d+)', first_line.lower())
+        version = ver_match.group(1) if ver_match else "unknown"
+        name = f"Apple Clang {version}"
+    else:
+        version = "unknown"
+        name = first_line
+
+    return {
+        "name": name,
+        "version": version,
+        "executable": executable,
+        "standard": "c++17",
+        "flags": "-std=c++17",
+    }
+
+
+# Module-level singleton (lazy — detected on first access)
+_compiler_info: Dict[str, str] | None = None
+
+
+def get_compiler() -> Dict[str, str]:
+    """Return the detected compiler info (cached after first call).
+
+    Returns:
+        Same dict as :func:`detect_compiler`.
+    """
+    global _compiler_info
+    if _compiler_info is None:
+        _compiler_info = detect_compiler()
+    return _compiler_info
+
+
+# ============================================================================
 # Memory profiling
 # ============================================================================
 
