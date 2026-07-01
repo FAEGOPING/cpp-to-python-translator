@@ -8,10 +8,12 @@ cloned repositories to a benchmark-ready dataset.
 Stages:
     1.  Repository Scan      →  ``repository_statistics.csv``
     2.  CPP Extraction       →  ``raw_cpp/``
-    3.  Duplicate Removal    →  ``duplicate_report.csv``
-    4.  Compile Validation   →  ``compile_report.csv``
-    5.  Metadata Generation  →  ``metadata.csv``
-    6.  Benchmark Dataset    →  ``benchmark_dataset/``
+    3.  Program Filtering    →  ``filter_report.csv``
+    4.  Duplicate Removal    →  ``duplicate_report.csv``
+    5.  Compile Validation   →  ``compile_report.csv``
+    6.  Metadata Generation  →  ``metadata.csv``
+    7.  Benchmark Dataset    →  ``benchmark_dataset/``
+    8.  Source Mapping       →  ``source_mapping.csv``
 
 Usage::
 
@@ -89,6 +91,7 @@ def _run_stage(
 _STAGES: list[tuple[str, str, str]] = [
     ("scan",      "Scan Repositories",     "dataset_manager.scan_repositories"),
     ("extract",   "Extract CPP Files",     "dataset_manager.extract_cpp"),
+    ("filter",    "Filter Programs",       "dataset_manager.filter_programs"),
     ("dedup",     "Deduplicate Files",     "dataset_manager.deduplicate"),
     ("compile",   "Compile Validation",    "dataset_manager.validate_cpp"),
     ("metadata",  "Generate Metadata",     "dataset_manager.metadata_generator"),

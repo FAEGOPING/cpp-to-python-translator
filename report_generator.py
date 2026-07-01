@@ -108,6 +108,8 @@ def generate_report(output_path: str | None = None, logger: Logger | None = None
     metadata = read_csv(os.path.join(REPORTS_DIR, "metadata.csv"))
     compile_report = read_csv(os.path.join(REPORTS_DIR, "compile_report.csv"))
     dedup_summary = read_csv(os.path.join(REPORTS_DIR, "dedup_summary.csv"))
+    filter_report = read_csv(os.path.join(REPORTS_DIR, "filter_report.csv"))
+    program_type = read_csv(os.path.join(REPORTS_DIR, "program_type.csv"))
 
     # Translation results (from project root, not dataset_manager/reports)
     proj_root = os.path.dirname(os.path.abspath(__file__))
@@ -195,6 +197,30 @@ def generate_report(output_path: str | None = None, logger: Logger | None = None
             if not name and not src:
                 continue
             lines.append(f"| {src}/{name} | {cpp} | {loc} |")
+        lines.append("")
+
+    # -- 1b. Program Filtering (v2.3) ---------------------------------------
+    exec_count = _read_metric(filter_report, "ExecutablePrograms") if filter_report else "N/A"
+    lib_count = _read_metric(filter_report, "Remove_LibraryFiles") if filter_report else "N/A"
+    test_count = _read_metric(filter_report, "Remove_TestFiles") if filter_report else "N/A"
+    dep_count = _read_metric(filter_report, "Remove_DependencyFiles") if filter_report else "N/A"
+    filter_rate = _read_metric(filter_report, "FilterRate") if filter_report else "N/A"
+
+    if filter_report and filter_rate != "N/A":
+        lines.append("### Dataset Filtering (v2.3)")
+        lines.append("")
+        lines.append("Only executable programs (containing a `main()` entry point)")
+        lines.append("are included in the benchmark dataset.  Library files, unit")
+        lines.append("tests, and files with unresolvable dependencies are excluded.")
+        lines.append("")
+        lines.append("| Category | Count |")
+        lines.append("|----------|-------|")
+        lines.append(f"| Total raw files | {total_cpp} |")
+        lines.append(f"| ✅ Executable programs | {exec_count} |")
+        lines.append(f"| ❌ Library files removed | {lib_count} |")
+        lines.append(f"| ❌ Test files removed | {test_count} |")
+        lines.append(f"| ❌ Dependency files removed | {dep_count} |")
+        lines.append(f"| **Pass rate** | **{filter_rate}** |")
         lines.append("")
 
     # -- 2. Translation Results ----------------------------------------------

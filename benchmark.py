@@ -4,9 +4,10 @@ benchmark.py — Complete Research Benchmark Pipeline
 
 One-command execution of the entire research workflow:
 
-    Dataset Scan → CPP Extraction → Deduplication → Compile Validation
-    → Metadata Generation → Benchmark Dataset → Translation → Repair
-    → Statistics → Figures → CSV Reports → Research Report
+    Dataset Scan → CPP Extraction → Program Filtering → Deduplication
+    → Compile Validation → Metadata Generation → Benchmark Dataset
+    → Translation → Repair → Statistics → Figures → CSV Reports
+    → Research Report
 
 Usage::
 
@@ -54,6 +55,10 @@ _STAGE_EXTRACT = (
     "extract", "Extract CPP Files",
     "dataset_manager.extract_cpp",
 )
+_STAGE_FILTER = (
+    "filter", "Filter Programs",
+    "dataset_manager.filter_programs",
+)
 _STAGE_DEDUP = (
     "dedup", "Deduplicate Files",
     "dataset_manager.deduplicate",
@@ -90,6 +95,7 @@ _STAGE_REPORT = (
 _ALL_STAGES: List[Tuple[str, str, str]] = [
     _STAGE_SCAN,
     _STAGE_EXTRACT,
+    _STAGE_FILTER,
     _STAGE_DEDUP,
     _STAGE_COMPILE,
     _STAGE_METADATA,

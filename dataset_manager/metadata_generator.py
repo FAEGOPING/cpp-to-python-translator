@@ -105,6 +105,21 @@ def _analyse_one(
     # Source info
     category, repo, rel_path, gh_url = extract_source_info(file_path, RAW_CPP_DIR)
 
+    # Program type classification (from filter stage)
+    from dataset_manager.filter_programs import get_filter_classification
+    classification = get_filter_classification()
+    prog_type = "unknown"
+    compile_eligible = "FALSE"
+    if file_path in classification.get("executable", set()):
+        prog_type = "executable"
+        compile_eligible = "TRUE"
+    elif file_path in classification.get("library", set()):
+        prog_type = "library"
+    elif file_path in classification.get("test", set()):
+        prog_type = "test"
+    elif file_path in classification.get("dependency", set()):
+        prog_type = "dependency"
+
     return [
         rel_path,
         lines["total"], lines["code"], lines["blank"], lines["comments"],
@@ -116,6 +131,7 @@ def _analyse_one(
         compiles, f"{compile_time:.3f}",
         category, repo, gh_url,
         size_bytes,
+        prog_type, compile_eligible,
     ]
 
 
@@ -181,6 +197,7 @@ _HEADER = [
     "CompileStatus", "CompileTimeSeconds",
     "Category", "Repository", "GitHubURL",
     "FileSizeBytes",
+    "ProgramType", "CompileEligible",
 ]
 
 

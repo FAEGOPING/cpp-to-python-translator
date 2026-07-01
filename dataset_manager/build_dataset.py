@@ -124,14 +124,21 @@ def main() -> None:
         logger.error(f"raw_cpp/ directory not found: {RAW_CPP_DIR}")
         sys.exit(1)
 
-    # Step 1: get unique files
-    unique = sorted(get_unique_files())
-    logger.info(f"Unique files: {len(unique)}")
+    from dataset_manager.filter_programs import get_executable_files
 
-    # Step 2: filter to compilable only
+    # Step 1: get executable files only
+    executable = get_executable_files(RAW_CPP_DIR, logger)
+    logger.info(f"Executable programs: {len(executable)}")
+
+    # Step 2: get unique files (dedup)
+    unique = get_unique_files()
+    candidates = sorted(executable & unique)
+    logger.info(f"Unique executable programs: {len(candidates)}")
+
+    # Step 3: filter to compilable only
     logger.info("Filtering to compilable files …")
-    compilable = get_compilable_files(unique)
-    logger.info(f"Compilable files: {len(compilable)}")
+    compilable = get_compilable_files(candidates)
+    logger.info(f"Compilable executable files: {len(compilable)}")
 
     if not compilable:
         logger.warn("No compilable files — cannot build dataset.")

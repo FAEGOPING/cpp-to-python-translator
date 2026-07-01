@@ -344,10 +344,63 @@ def error_category_distribution(logger: Logger) -> Optional[str]:
 # Generate all figures
 # ============================================================================
 
+def filter_distribution(logger: Logger) -> Optional[str]:
+    """Pie chart: program classification breakdown (executable/library/test/dep).
+
+    Args:
+        logger: :class:`Logger` instance.
+
+    Returns:
+        Path to the saved figure.
+    """
+    filter_path = os.path.join(REPORTS_DIR, "filter_report.csv")
+    rows = read_csv(filter_path)
+    if not rows:
+        logger.warn("No filter_report.csv — skipping filter_distribution")
+        return None
+
+    data: dict[str, int] = {}
+    for r in rows:
+        metric = r.get("Metric", "")
+        val = r.get("Value", "0").replace("%", "")
+        try:
+            if "ExecutablePrograms" in metric:
+                data["Executable"] = int(val)
+            elif "Library" in metric and "Remove" in metric:
+                data["Library"] = int(val)
+            elif "Test" in metric and "Remove" in metric:
+                data["Tests"] = int(val)
+            elif "Dependency" in metric and "Remove" in metric:
+                data["Dependency"] = int(val)
+        except (ValueError, TypeError):
+            pass
+
+    if not data:
+        logger.warn("No filter data extracted")
+        return None
+
+    labels, values = zip(*data.items())
+    colors = ["#2ecc71", "#e74c3c", "#f39c12", "#3498db"]
+
+    fig, ax = plt.subplots(figsize=(8, 8))
+    wedges, texts, autotexts = ax.pie(
+        values, labels=[f"{l} ({v})" for l, v in zip(labels, values)],
+        autopct="%1.1f%%", colors=colors, startangle=90,
+    )
+    for at in autotexts:
+        at.set_fontsize(11)
+    ax.set_title("Program Classification — Filtering Breakdown")
+    _save_figure("filter_distribution")
+    plt.close()
+    logger.info(f"  filter_distribution: {sum(values)} files across {len(labels)} categories")
+    return os.path.join(FIGURES_DIR, "filter_distribution.png")
+
+
 _ALL_FIGURES = [
     ("dataset_distribution", dataset_distribution),
     ("repository_distribution", repository_distribution),
     ("loc_histogram", loc_histogram),
+    ("filter_distribution", filter_distribution),
     ("compile_success_rate", compile_success_rate),
     ("translation_success_rate", translation_success_rate),
     ("repair_distribution", repair_distribution),
