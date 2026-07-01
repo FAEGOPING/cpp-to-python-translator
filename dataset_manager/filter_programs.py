@@ -292,7 +292,7 @@ def classify_all_files(
     executable: set[str] = set()
     library: set[str] = set()
     tests: set[str] = set()
-    dependency: set[str] = set()
+    dependency_warnings: set[str] = set()  # informational only — does NOT exclude
 
     # Collect all .cpp files
     all_files: list[str] = []
@@ -316,12 +316,16 @@ def classify_all_files(
         is_test, framework = _detect_test_framework(clean)
         has_deps = _has_unresolved_dependencies(fpath, clean, raw_cpp_root)
 
-        # Classification order: test > dependency > executable > library
+        # Record dependency as a warning (informational only — does NOT exclude)
+        if has_deps:
+            dependency_warnings.add(fpath)
+
+        # Classification: test → library → executable
+        # Files with unresolved dependencies are still classified by main()
+        # presence because compile validation now uses original repo paths
+        # where local headers are available.
         if is_test:
             tests.add(fpath)
-        elif has_deps and not has_main:
-            # Missing local headers AND no main → truly dependency-only
-            dependency.add(fpath)
         elif has_main:
             executable.add(fpath)
         else:
@@ -331,7 +335,7 @@ def classify_all_files(
             logger.info(
                 f"  Classified {i + 1}/{total}  "
                 f"(exec={len(executable)} lib={len(library)} "
-                f"test={len(tests)} dep={len(dependency)})"
+                f"test={len(tests)} dep_warn={len(dependency_warnings)})"
             )
 
     if logger:
@@ -339,13 +343,19 @@ def classify_all_files(
         logger.count("executable", len(executable))
         logger.count("library", len(library))
         logger.count("test", len(tests))
-        logger.count("dependency", len(dependency))
+        logger.count("dependency_warning", len(dependency_warnings))
+        if dependency_warnings:
+            logger.warn(
+                f"{len(dependency_warnings)} files have local #include "
+                f"headers that may not resolve — these are still included "
+                f"in the benchmark (compile validation uses original repo paths)"
+            )
 
     return {
         "executable": executable,
         "library": library,
         "test": tests,
-        "dependency": dependency,
+        "dependency": dependency_warnings,  # kept for backward compat (warnings only)
     }
 
 
