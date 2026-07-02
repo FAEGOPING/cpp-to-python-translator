@@ -64,6 +64,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 
+from statistics import load_stats, ExperimentStats, _safe_float, _safe_int, _safe_bool
 from dataset_manager.utils import (
     REPORTS_DIR, FIGURES_DIR, LOGS_DIR, BENCHMARK_DIR, RAW_CPP_DIR,
     Logger, read_csv, write_csv, timestamp, get_compiler, memory_usage_mb,
