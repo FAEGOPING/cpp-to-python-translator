@@ -28,3 +28,6 @@ dataset_manager/reports/**
 dataset_manager/logs/**
 !dataset_manager/logs/.gitkeep
 dataset_manager/__pycache__/
+
+# Experiment runner — generated outputs (timestamped)
+experiment_results/
