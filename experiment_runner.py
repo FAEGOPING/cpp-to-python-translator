@@ -647,6 +647,7 @@ def _run_translation_experiment(
 
     # Discover C++ files in samples/
     from run import process_program, _cleanup_cpp_cache
+    from run import enable_buffer_mode, flush_sorted_csvs
 
     try:
         cpp_files = sorted([
@@ -698,6 +699,7 @@ def _run_translation_experiment(
                           f"{os.path.basename(cpp_file)}: {exc}")
         else:
             # ---- parallel path (ThreadPoolExecutor) --------------------------
+            enable_buffer_mode()
             completed_lock = threading.Lock()
             completed = [0]  # mutable counter for closure
 
@@ -719,6 +721,9 @@ def _run_translation_experiment(
                         pct = completed[0] * 100 // total
                         print(f"\n  [progress] Completed: "
                               f"{completed[0]} / {total} ({pct}%)")
+
+            # Sort buffered rows by program name, then write CSVs
+            flush_sorted_csvs()
     except Exception as exc:
         logger.error(f"Translation pipeline error: {exc}")
         import traceback

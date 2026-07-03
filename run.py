@@ -39,6 +39,111 @@ from typing import List, Optional, Tuple
 # Thread-safe CSV writes for parallel experiment execution
 _csv_lock = threading.Lock()
 
+# Buffered CSV mode — rows are collected in memory instead of written
+# to disk immediately. The main thread sorts and flushes them after
+# all workers complete, guaranteeing deterministic output ordering.
+_buffer_mode: bool = False
+_result_buffer: list[list] = []
+_summary_buffer: list[list] = []
+_buffer_header: list[str] | None = None
+_buffer_summary_header: list[str] | None = None
+
+
+def enable_buffer_mode() -> None:
+    """Switch CSV logging to in-memory buffering.
+
+    When enabled, :func:`log_result` and :func:`log_summary` append rows
+    to internal lists instead of writing to files.  Call
+    :func:`flush_sorted_csvs` after all workers finish to write the
+    aggregated CSV files sorted by program name.
+
+    This has no effect on the sequential path — direct file writes are
+    the default.
+    """
+    global _buffer_mode, _result_buffer, _summary_buffer
+    global _buffer_header, _buffer_summary_header
+    _buffer_mode = True
+    _result_buffer = []
+    _summary_buffer = []
+    _buffer_header = None
+    _buffer_summary_header = None
+
+
+def flush_sorted_csvs() -> None:
+    """Write buffered CSV rows to disk, sorted by program filename.
+
+    Sorts both the per-round experiment log and the per-program summary
+    log alphabetically by ``Program`` (the first column), then writes
+    complete CSV files with headers.
+
+    Idempotent — calling when buffer mode is not active or buffers are
+    empty is a no-op.
+    """
+    global _buffer_mode, _result_buffer, _summary_buffer
+    global _buffer_header, _buffer_summary_header
+
+    if not _buffer_mode:
+        return
+
+    cfg = _cfg()
+
+    # --- detailed experiment CSV ---
+    if _result_buffer:
+        _result_buffer.sort(key=lambda row: _sort_key(row[0]))
+        try:
+            with open(cfg.csv_file, mode="w", newline="", encoding="utf-8") as fh:
+                writer = csv.writer(fh)
+                if _buffer_header:
+                    writer.writerow(_buffer_header)
+                for row in _result_buffer:
+                    writer.writerow(row)
+        except OSError:
+            pass
+
+    # --- summary CSV ---
+    if _summary_buffer:
+        _summary_buffer.sort(key=lambda row: _sort_key(row[0]))
+        try:
+            with open(cfg.summary_csv, mode="w", newline="", encoding="utf-8") as fh:
+                writer = csv.writer(fh)
+                if _buffer_summary_header:
+                    writer.writerow(_buffer_summary_header)
+                for row in _summary_buffer:
+                    writer.writerow(row)
+        except OSError:
+            pass
+
+    # Reset state
+    _buffer_mode = False
+    _result_buffer = []
+    _summary_buffer = []
+    _buffer_header = None
+    _buffer_summary_header = None
+
+
+def _sort_key(program_name: str) -> tuple:
+    """Natural sort key for program filenames.
+
+    Ensures ``program_000002.cpp`` sorts after ``program_000001.cpp``
+    rather than lexicographically after ``program_000010.cpp``.
+
+    Args:
+        program_name: A filename like ``"program_000123.cpp"``.
+
+    Returns:
+        A tuple suitable for use as a sort key.
+    """
+    import re
+    base = program_name.replace(".cpp", "").replace(".py", "")
+    parts = re.split(r"(\d+)", base)
+    key: list = []
+    for p in parts:
+        if p.isdigit():
+            key.append((0, int(p)))
+        else:
+            key.append((1, p.lower()))
+    return tuple(key)
+
 from gpt_api import call_gpt
 
 # Framework modules
@@ -824,52 +929,59 @@ def log_result(
         total_repair_attempts: Cumulative repair attempts.
     """
     csv_path = _cfg().csv_file
-    file_exists = os.path.isfile(csv_path)
     use_extended = _cfg().extended_logging
 
     header = list(_EXPERIMENT_HEADER)
     if use_extended:
         header.extend(_EXPERIMENT_HEADER_EXTENDED)
 
-    try:
-        with _csv_lock, open(csv_path, mode="a", newline="", encoding="utf-8") as fh:
-            writer = csv.writer(fh)
+    # Build the row identically regardless of write mode
+    base_row = [
+        program,
+        round_num,
+        compile_pass,
+        runtime_pass,
+        functional_pass,
+        error_type,
+        round(elapsed_time, 2),
+        repair_count,
+    ]
 
-            if not file_exists:
-                writer.writerow(header)
+    if use_extended:
+        base_row.extend([
+            round(translation_time, 4) if translation_time is not None else "",
+            round(compile_time, 4) if compile_time is not None else "",
+            round(runtime_time, 4) if runtime_time is not None else "",
+            round(validation_time, 4) if validation_time is not None else "",
+            round(repair_time, 4) if repair_time is not None else "",
+            round(llm_response_time, 4) if llm_response_time is not None else "",
+            generated_test_count if generated_test_count is not None else "",
+            executed_test_count if executed_test_count is not None else "",
+            passed_test_count if passed_test_count is not None else "",
+            round(success_rate, 4) if success_rate is not None else "",
+            failure_reason or "",
+            final_error_type or "",
+            total_repair_attempts if total_repair_attempts is not None else "",
+        ])
 
-            base_row = [
-                program,
-                round_num,
-                compile_pass,
-                runtime_pass,
-                functional_pass,
-                error_type,
-                round(elapsed_time, 2),
-                repair_count,
-            ]
-
-            if use_extended:
-                base_row.extend([
-                    round(translation_time, 4) if translation_time is not None else "",
-                    round(compile_time, 4) if compile_time is not None else "",
-                    round(runtime_time, 4) if runtime_time is not None else "",
-                    round(validation_time, 4) if validation_time is not None else "",
-                    round(repair_time, 4) if repair_time is not None else "",
-                    round(llm_response_time, 4) if llm_response_time is not None else "",
-                    generated_test_count if generated_test_count is not None else "",
-                    executed_test_count if executed_test_count is not None else "",
-                    passed_test_count if passed_test_count is not None else "",
-                    round(success_rate, 4) if success_rate is not None else "",
-                    failure_reason or "",
-                    final_error_type or "",
-                    total_repair_attempts if total_repair_attempts is not None else "",
-                ])
-
-            writer.writerow(base_row)
-    except OSError:
-        # Logging is best-effort — don't crash the pipeline
-        pass
+    if _buffer_mode:
+        # Append to in-memory buffer — main thread sorts + flushes later
+        global _buffer_header
+        with _csv_lock:
+            if _buffer_header is None:
+                _buffer_header = header
+            _result_buffer.append(base_row)
+    else:
+        # Write directly to disk (sequential path)
+        file_exists = os.path.isfile(csv_path)
+        try:
+            with _csv_lock, open(csv_path, mode="a", newline="", encoding="utf-8") as fh:
+                writer = csv.writer(fh)
+                if not file_exists:
+                    writer.writerow(header)
+                writer.writerow(base_row)
+        except OSError:
+            pass  # Logging is best-effort
 
 
 # ============================================================================
@@ -947,48 +1059,55 @@ def log_summary(
         total_repair_attempts: Cumulative repair attempts.
     """
     summary_path = _cfg().summary_csv
-    file_exists = os.path.isfile(summary_path)
     use_extended = _cfg().extended_logging
 
     header = list(_SUMMARY_HEADER)
     if use_extended:
         header.extend(_SUMMARY_HEADER_EXTENDED)
 
-    try:
-        with _csv_lock, open(summary_path, mode="a", newline="", encoding="utf-8") as fh:
-            writer = csv.writer(fh)
+    # Build the row identically regardless of write mode
+    base_row = [
+        program,
+        initial_compile_pass,
+        final_compile_pass,
+        runtime_pass,
+        functional_pass,
+        repair_rounds,
+        round(total_time, 2),
+    ]
 
-            if not file_exists:
-                writer.writerow(header)
+    if use_extended:
+        base_row.extend([
+            round(translation_time, 4) if translation_time is not None else "",
+            round(validation_time, 4) if validation_time is not None else "",
+            round(avg_repair_time, 4) if avg_repair_time is not None else "",
+            generated_test_count if generated_test_count is not None else "",
+            executed_test_count if executed_test_count is not None else "",
+            passed_test_count if passed_test_count is not None else "",
+            round(success_rate, 4) if success_rate is not None else "",
+            final_error_type or "",
+            error_category or "",
+            total_repair_attempts if total_repair_attempts is not None else "",
+        ])
 
-            base_row = [
-                program,
-                initial_compile_pass,
-                final_compile_pass,
-                runtime_pass,
-                functional_pass,
-                repair_rounds,
-                round(total_time, 2),
-            ]
-
-            if use_extended:
-                base_row.extend([
-                    round(translation_time, 4) if translation_time is not None else "",
-                    round(validation_time, 4) if validation_time is not None else "",
-                    round(avg_repair_time, 4) if avg_repair_time is not None else "",
-                    generated_test_count if generated_test_count is not None else "",
-                    executed_test_count if executed_test_count is not None else "",
-                    passed_test_count if passed_test_count is not None else "",
-                    round(success_rate, 4) if success_rate is not None else "",
-                    final_error_type or "",
-                    error_category or "",
-                    total_repair_attempts if total_repair_attempts is not None else "",
-                ])
-
-            writer.writerow(base_row)
-    except OSError:
-        # Logging is best-effort — don't crash the pipeline
-        pass
+    if _buffer_mode:
+        # Append to in-memory buffer — main thread sorts + flushes later
+        global _buffer_summary_header
+        with _csv_lock:
+            if _buffer_summary_header is None:
+                _buffer_summary_header = header
+            _summary_buffer.append(base_row)
+    else:
+        # Write directly to disk (sequential path)
+        file_exists = os.path.isfile(summary_path)
+        try:
+            with _csv_lock, open(summary_path, mode="a", newline="", encoding="utf-8") as fh:
+                writer = csv.writer(fh)
+                if not file_exists:
+                    writer.writerow(header)
+                writer.writerow(base_row)
+        except OSError:
+            pass  # Logging is best-effort
 
 
 # ============================================================================
