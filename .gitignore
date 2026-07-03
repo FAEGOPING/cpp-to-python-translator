@@ -31,3 +31,6 @@ dataset_manager/__pycache__/
 
 # Experiment runner — generated outputs (timestamped)
 experiment_results/
+
+# Paper archive — generated experiment snapshots
+paper_results/

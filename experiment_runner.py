@@ -772,6 +772,13 @@ def main(argv: Optional[List[str]] = None) -> None:
         except Exception as exc:
             logger.warn(f"Report generation failed: {exc}")
 
+    # ---- Paper archive ----
+    try:
+        from paper_archive import archive_paper_results
+        archive_paper_results(run_dir, args.limit, logger)
+    except Exception as exc:
+        logger.warn(f"Paper archive creation failed: {exc}")
+
     # ---- Final summary ----
     print(f"\n{'═' * 70}")
     print("EXPERIMENT COMPLETE")
