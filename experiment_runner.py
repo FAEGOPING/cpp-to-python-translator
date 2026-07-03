@@ -775,7 +775,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     # ---- Paper archive ----
     try:
         from paper_archive import archive_paper_results
-        archive_paper_results(run_dir, args.limit, logger)
+        archive_paper_results(run_dir, args.limit, args.repair, args.runtime, logger)
     except Exception as exc:
         logger.warn(f"Paper archive creation failed: {exc}")
 

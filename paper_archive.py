@@ -3,29 +3,37 @@ paper_archive.py — Automatic Paper Archive System
 ===================================================
 
 Automatically organises every completed experiment into a paper-ready
-directory structure under ``paper_results/EXP_<limit>/``.
+directory structure under ``paper_results/``.
 
-The archive is created **after** report generation and is designed to
-never interrupt the experiment pipeline — all file operations are
-wrapped in individual try/except blocks, and missing files produce
-warnings rather than errors.
+Naming rules
+    - Baseline (no repair):  ``EXP_<limit>/``
+    - Repair enabled:        ``EXP_<limit>_REPAIR/``
+
+Existing archives are **never** overwritten — each experiment is
+preserved permanently.
 
 Usage::
 
     from paper_archive import archive_paper_results
 
-    archive_paper_results(run_dir, limit, logger)
+    archive_paper_results(run_dir, limit, repair, runtime, logger)
 
 Directory layout created::
 
     paper_results/
-        EXP_<limit>/
+        EXP_20/
             csv/            — experiment CSV files
             reports/        — generated Markdown report
             config/         — experiment configuration
             figures/        — publication-quality figures
             translated/     — translated Python programs
             README.txt      — experiment summary
+        EXP_20_REPAIR/
+            ...
+        EXP_100/
+            ...
+        EXP_100_REPAIR/
+            ...
 """
 
 from __future__ import annotations
@@ -37,13 +45,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+
 # ---------------------------------------------------------------------------
 # Paths (relative to project root)
 # ---------------------------------------------------------------------------
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 PAPER_ROOT = PROJECT_ROOT / "paper_results"
-EXPERIMENT_ROOT = PROJECT_ROOT / "experiment_results"
 TRANSLATED_DIR = PROJECT_ROOT / "translated"
 FIGURES_SRC = PROJECT_ROOT / "dataset_manager" / "reports" / "figures"
 
@@ -55,18 +63,24 @@ FIGURES_SRC = PROJECT_ROOT / "dataset_manager" / "reports" / "figures"
 def archive_paper_results(
     run_dir: str,
     limit: str,
+    repair: bool = False,
+    runtime: bool = False,
     logger: Optional[object] = None,
 ) -> Optional[Path]:
-    """Create a paper-ready archive of an experiment.
+    """Create a paper-ready archive of a completed experiment.
 
     Copies CSVs, reports, config, figures, and translated programs into
-    ``paper_results/EXP_<limit>/`` and generates a ``README.txt`` summary.
+    ``paper_results/EXP_<limit>/`` (baseline) or
+    ``paper_results/EXP_<limit>_REPAIR/`` (repair), then generates a
+    ``README.txt`` summary.
 
     Args:
         run_dir: Absolute path to the experiment output directory
                  (e.g. ``experiment_results/2026-07-02_15-40-26/``).
         limit: The ``--limit`` value passed to the experiment runner
                (e.g. ``"20"``, ``"100"``, ``"all"``).
+        repair: ``True`` if ``--repair`` was enabled.
+        runtime: ``True`` if ``--runtime`` was enabled.
         logger: Optional Logger instance for structured output.
                 If ``None``, messages are printed to stdout.
 
@@ -90,9 +104,11 @@ def archive_paper_results(
     # ---- determine archive name ----
     limit_normalised = str(limit).strip().lower()
     if limit_normalised in ("all", "none", ""):
-        archive_name = "EXP_ALL"
+        base = "EXP_ALL"
     else:
-        archive_name = f"EXP_{limit}"
+        base = f"EXP_{limit}"
+
+    archive_name = f"{base}_REPAIR" if repair else base
 
     archive_dir = PAPER_ROOT / archive_name
 
@@ -109,8 +125,7 @@ def archive_paper_results(
         return None
 
     # ---- subdirectories ----
-    subdirs = ["csv", "reports", "config", "figures", "translated"]
-    for sub in subdirs:
+    for sub in ("csv", "reports", "config", "figures", "translated"):
         try:
             (archive_dir / sub).mkdir(parents=True, exist_ok=True)
         except OSError as exc:
@@ -197,7 +212,7 @@ def archive_paper_results(
     # ---- generate README ----
     _log("  Generating README.txt …")
     try:
-        _generate_readme(archive_dir, run_dir, limit)
+        _generate_readme(archive_dir, run_dir, limit, repair, runtime)
         _log("  README.txt written")
     except Exception as exc:
         _warn(f"Could not generate README.txt: {exc}")
@@ -212,19 +227,26 @@ def archive_paper_results(
 # README generation
 # ---------------------------------------------------------------------------
 
-def _generate_readme(archive_dir: Path, run_dir: str, limit: str) -> None:
+def _generate_readme(
+    archive_dir: Path,
+    run_dir: str,
+    limit: str,
+    repair: bool,
+    runtime: bool,
+) -> None:
     """Generate ``README.txt`` inside the archive directory.
 
     Pulls experiment metadata from the config JSON and statistics from
     :func:`statistics.load_stats`.  Missing values are rendered as ``N/A``.
     """
+    import json
+
     readme_path = archive_dir / "README.txt"
 
     # --- load experiment config ---
-    config = {}
+    config: dict = {}
     config_path = Path(run_dir) / "config" / "experiment_configuration.json"
     if config_path.is_file():
-        import json
         try:
             with open(config_path) as fh:
                 config = json.load(fh)
@@ -242,37 +264,22 @@ def _generate_readme(archive_dir: Path, run_dir: str, limit: str) -> None:
     # --- extract values ---
     exp_id = config.get("experiment_id", os.path.basename(run_dir))
     timestamp = config.get("timestamp", "N/A")
-
-    # Split timestamp into date/time if possible
     if timestamp != "N/A" and " " in timestamp:
-        date_str, time_str = timestamp.split(" ", 1)
+        date_str = timestamp.split(" ", 1)[0]
     else:
         date_str = timestamp
-        time_str = "N/A"
 
-    dataset_size = _nvl(config.get("selection", {}).get("total_available"))
-    final_count = _nvl(config.get("selection", {}).get("final_count"))
     limit_val = limit if str(limit).strip().lower() != "all" else "ALL"
-    repair_enabled = _nvl(config.get("cli_arguments", {}).get("repair"))
-    compiler_name = "N/A"
-    compiler_info = config.get("compiler", {})
-    if isinstance(compiler_info, dict):
-        compiler_name = compiler_info.get("name", "N/A")
-    python_ver = config.get("python_version", "N/A")
-    git_commit = config.get("git_commit", "N/A")
-    if git_commit != "N/A" and len(git_commit) > 8:
-        git_commit = git_commit[:8]  # short hash
 
-    # Statistics fields (with fallback)
+    # Statistics
     compile_rate = _fmt_pct(_safe_attr(stats, "compile_success_rate"))
     runtime_rate = _fmt_pct(_safe_attr(stats, "runtime_success_rate"))
     functional_rate = _fmt_pct(_safe_attr(stats, "functional_success_rate"))
     avg_trans = _fmt_sec(_safe_attr(stats, "avg_translation_time"))
-    avg_compile = _fmt_sec(_safe_attr(stats, "avg_compile_time"))
-    avg_runtime = _fmt_sec(_safe_attr(stats, "avg_runtime_time"))
     avg_valid = _fmt_sec(_safe_attr(stats, "avg_validation_time"))
-    avg_repair_time = _fmt_sec(_safe_attr(stats, "avg_repair_time"))
-    avg_repair_rounds = _nvl(_safe_attr(stats, "avg_repair_rounds"))
+    avg_runtime = _fmt_sec(_safe_attr(stats, "avg_runtime_time"))
+    repair_rounds = _nvl(_safe_attr(stats, "avg_repair_rounds"))
+    programs_repaired = _nvl(_safe_attr(stats, "programs_repaired"))
 
     # ---- write ----
     lines = textwrap.dedent(f"""\
@@ -280,30 +287,23 @@ def _generate_readme(archive_dir: Path, run_dir: str, limit: str) -> None:
     EXPERIMENT ARCHIVE — {archive_dir.name}
     ================================================================================
 
-    Experiment ID:         {exp_id}
-    Date:                  {date_str}
-    Time:                  {time_str}
-    Dataset Size:          {dataset_size}
-    Limit:                 {limit_val}
-    Programs Run:          {final_count}
+    Experiment ID:           {exp_id}
+    Date:                    {date_str}
+    Limit:                   {limit_val}
+    Repair:                  {repair}
+    Runtime Validation:      {runtime}
 
-    Compile Success Rate:  {compile_rate}
-    Runtime Success Rate:  {runtime_rate}
-    Functional Success Rate:{functional_rate}
+    Compile Success Rate:    {compile_rate}
+    Runtime Success Rate:    {runtime_rate}
+    Functional Success Rate: {functional_rate}
 
-    Repair Enabled:        {repair_enabled}
+    Average Translation Time:{avg_trans}
+    Average Validation Time: {avg_valid}
+    Average Runtime:         {avg_runtime}
+    Repair Attempts:         {repair_rounds}
+    Programs Repaired:       {programs_repaired}
 
-    Average Translation Time:  {avg_trans}
-    Average Compile Time:      {avg_compile}
-    Average Runtime:           {avg_runtime}
-    Average Validation Time:   {avg_valid}
-    Average Repair Time:       {avg_repair_time}
-    Average Repair Rounds:     {avg_repair_rounds}
-
-    Compiler:              {compiler_name}
-    Python Version:        {python_ver}
-    Git Commit:            {git_commit}
-    Output Directory:      paper_results/{archive_dir.name}/
+    Output Directory:        paper_results/{archive_dir.name}/
 
     ================================================================================
     Generated by paper_archive.py on {datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")}
@@ -325,18 +325,9 @@ def _print_summary(archive_name: str) -> None:
     {'=' * 70}
     Experiment finished successfully.
 
-    Paper archive created:
+    Paper archive:
 
         paper_results/{archive_name}/
-
-    Archive contains:
-
-        CSV             — experiment results data
-        Reports         — generated Markdown report
-        Configuration   — experiment parameters
-        Figures         — publication-quality figures
-        Translated      — translated Python programs
-        README          — experiment summary
 
     {'=' * 70}
     """)
