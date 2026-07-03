@@ -36,7 +36,9 @@ import shutil
 import subprocess
 import sys
 import textwrap
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -122,6 +124,8 @@ def _build_parser() -> argparse.ArgumentParser:
                          help="Resume from the last unfinished experiment")
     general.add_argument("--output-dir", type=str, default=None,
                          help="Custom output directory (overrides timestamped dir)")
+    general.add_argument("--workers", type=int, default=1,
+                         help="Number of parallel workers (default: 1, sequential)")
 
     # -- Selection ----------------------------------------------------------
     selection = p.add_argument_group("Program Selection")
@@ -599,6 +603,10 @@ def _run_translation_experiment(
 ) -> bool:
     """Run the C++ → Python translation pipeline on selected programs.
 
+    When ``--workers`` > 1, programs are processed in parallel via
+    :class:`~concurrent.futures.ThreadPoolExecutor`.  Each worker runs
+    the full translation → validation → repair pipeline independently.
+
     Args:
         program_files: List of program filenames.
         args: Parsed arguments.
@@ -637,12 +645,80 @@ def _run_translation_experiment(
     _prepare_samples_dir(program_files)
     logger.info(f"  Programs staged: {len(program_files)}")
 
-    # Run the translation pipeline
-    from run import main as run_main
-    from run import _cleanup_cpp_cache
+    # Discover C++ files in samples/
+    from run import process_program, _cleanup_cpp_cache
 
     try:
-        run_main()
+        cpp_files = sorted([
+            os.path.join(cfg.samples_dir, f)
+            for f in os.listdir(cfg.samples_dir)
+            if f.endswith(".cpp")
+        ])
+    except OSError as exc:
+        logger.error(f"Cannot read samples directory: {exc}")
+        return False
+
+    total = len(cpp_files)
+
+    # Determine worker count
+    workers = max(1, args.workers)
+
+    # Print banner (matching sequential output from run.main)
+    print(f"\n{'=' * 60}")
+    print("Research-Grade C++ → Python Translation Framework")
+    print(f"{'=' * 60}")
+    print(f"  Samples dir    : {cfg.samples_dir}")
+    print(f"  Translated dir : {cfg.translated_dir}")
+    print(f"  Max rounds     : {cfg.max_repair_rounds}")
+    print(f"  Timeout        : {cfg.execution_timeout}s")
+    print(f"  Auto-test      : {cfg.auto_test}")
+    print(f"  Validation     : {cfg.validation_strategy}")
+    print(f"  Caching        : {cfg.enable_caching}")
+    print(f"  C++ files found: {total}")
+    if workers == 1:
+        logger.info("  Mode: sequential")
+    else:
+        print(f"  Workers        : {workers}")
+        logger.info(f"  Mode: parallel ({workers} workers)")
+
+    if not cpp_files:
+        print(f"\n  ⚠️  No .cpp files found in {cfg.samples_dir}")
+        print("     Add C++ source files to the samples/ directory.\n")
+        _cleanup_cpp_cache()
+        return True
+
+    try:
+        if workers == 1:
+            # ---- sequential path (original behaviour) ------------------------
+            for cpp_file in cpp_files:
+                try:
+                    process_program(cpp_file)
+                except Exception as exc:
+                    print(f"\n  💥 Unexpected error processing "
+                          f"{os.path.basename(cpp_file)}: {exc}")
+        else:
+            # ---- parallel path (ThreadPoolExecutor) --------------------------
+            completed_lock = threading.Lock()
+            completed = [0]  # mutable counter for closure
+
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = {}
+                for cpp_file in cpp_files:
+                    fut = executor.submit(process_program, cpp_file)
+                    futures[fut] = os.path.basename(cpp_file)
+
+                for fut in as_completed(futures):
+                    name = futures[fut]
+                    try:
+                        fut.result()
+                    except Exception as exc:
+                        print(f"\n  💥 Worker error on {name}: {exc}")
+
+                    with completed_lock:
+                        completed[0] += 1
+                        pct = completed[0] * 100 // total
+                        print(f"\n  [progress] Completed: "
+                              f"{completed[0]} / {total} ({pct}%)")
     except Exception as exc:
         logger.error(f"Translation pipeline error: {exc}")
         import traceback
@@ -650,6 +726,14 @@ def _run_translation_experiment(
         return False
     finally:
         _cleanup_cpp_cache()
+
+    # Print summary (matching sequential output from run.main)
+    print(f"\n{'=' * 60}")
+    print("Experiment completed.")
+    print(f"  Detailed log : {cfg.csv_file}")
+    print(f"  Summary log  : {cfg.summary_csv}")
+    print(f"  Translations : {cfg.translated_dir}/")
+    print(f"{'=' * 60}\n")
 
     return True
 

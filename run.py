@@ -32,8 +32,12 @@ import csv
 import os
 import subprocess
 import tempfile
+import threading
 import time
 from typing import List, Optional, Tuple
+
+# Thread-safe CSV writes for parallel experiment execution
+_csv_lock = threading.Lock()
 
 from gpt_api import call_gpt
 
@@ -828,7 +832,7 @@ def log_result(
         header.extend(_EXPERIMENT_HEADER_EXTENDED)
 
     try:
-        with open(csv_path, mode="a", newline="", encoding="utf-8") as fh:
+        with _csv_lock, open(csv_path, mode="a", newline="", encoding="utf-8") as fh:
             writer = csv.writer(fh)
 
             if not file_exists:
@@ -951,7 +955,7 @@ def log_summary(
         header.extend(_SUMMARY_HEADER_EXTENDED)
 
     try:
-        with open(summary_path, mode="a", newline="", encoding="utf-8") as fh:
+        with _csv_lock, open(summary_path, mode="a", newline="", encoding="utf-8") as fh:
             writer = csv.writer(fh)
 
             if not file_exists:
