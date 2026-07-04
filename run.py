@@ -1184,6 +1184,12 @@ def log_summary(
 # Core processing loop — one C++ file
 # ============================================================================
 
+def _dbg(msg: str, program: str, start: float) -> None:
+    """Debug log with timestamp, program name, and elapsed time."""
+    elapsed = time.time() - start
+    print(f"  DBG [{elapsed:8.2f}s] {program:30s} | {msg}", flush=True)
+
+
 def process_program(program_path: str) -> None:
     """Run the full translation → validate → repair pipeline for one program.
 
@@ -1206,6 +1212,8 @@ def process_program(program_path: str) -> None:
     program_name = os.path.basename(program_path)
     reset_program_tokens()
     mon = get_monitor()
+    start_time = time.time()  # Moved up early for debug logging
+    _dbg("START process_program", program_name, start_time)
 
     print(f"\n{'=' * 60}")
     print(f"Processing: {program_name}")
@@ -1253,9 +1261,9 @@ def process_program(program_path: str) -> None:
     cache = ExecutionCache() if cfg.enable_caching else None
 
     # -- initial translation -------------------------------------------------
-    start_time = time.time()
 
     # Try translation cache first (avoids unnecessary LLM API calls)
+    _dbg("before cache lookup", program_name, start_time)
     cached = _cache_lookup(program_name)
     if cached is not None:
         python_code = cached
@@ -1263,14 +1271,18 @@ def process_program(program_path: str) -> None:
         _trans_result = CallResult(text=cached, prompt_tokens=0,
                                     completion_tokens=0, total_tokens=0,
                                     elapsed_seconds=0.0, retry_count=0)
+        _dbg("cache HIT", program_name, start_time)
     else:
+        _dbg("cache MISS - before LLM call", program_name, start_time)
         print("  Generating initial translation …")
         t0 = time.time()
         python_code, _trans_result = translate_cpp(cpp_code)
         translation_time = time.time() - t0
+        _dbg(f"LLM returned {len(python_code)} chars", program_name, start_time)
         mon.record_translation(translation_time)
         mon.record_api_wait(_trans_result.elapsed_seconds)
         _cache_save(program_name, python_code)
+        _dbg("cache SAVED", program_name, start_time)
 
     initial_compile_pass: bool = False
     repair_history_entries: list[str] = []
@@ -1281,13 +1293,18 @@ def process_program(program_path: str) -> None:
     # ---- no-repair (single-pass) path ------------------------------------
     # When repair is disabled, validate exactly once and return.
     # Never enter the repair loop, never print "Maximum repair rounds".
+    _dbg(f"max_repair_rounds={cfg.max_repair_rounds}", program_name, start_time)
+
     if cfg.max_repair_rounds == 0:
         elapsed = time.time() - start_time
+        _dbg("NO-REPAIR path entered", program_name, start_time)
 
         # Compile check
+        _dbg("before check_compile", program_name, start_time)
         t0_c = time.time()
         compile_ok, compile_error = check_compile(python_code)
         compile_time = time.time() - t0_c
+        _dbg(f"check_compile returned ok={compile_ok}", program_name, start_time)
         mon.record_compile(compile_time)
 
         if not compile_ok:
@@ -1321,10 +1338,12 @@ def process_program(program_path: str) -> None:
         initial_compile_pass = True
 
         # Runtime check
+        _dbg("before run_python", program_name, start_time)
         t0_r = time.time()
         first_input = all_test_cases[0][0] if all_test_cases else ""
         runtime_ok, runtime_output = run_python(python_code, first_input)
         runtime_time = time.time() - t0_r
+        _dbg(f"run_python returned ok={runtime_ok}", program_name, start_time)
         mon.record_runtime(runtime_time)
 
         if not runtime_ok:
@@ -1357,14 +1376,17 @@ def process_program(program_path: str) -> None:
             return
 
         # Functional validation
+        _dbg("before functional validate", program_name, start_time)
         t0_v = time.time()
         mismatch = ""  # safe default for both validation paths
         if cfg.validation_strategy == "differential" and total_test_count > 0:
+            _dbg("before validate_translation_multi", program_name, start_time)
             report = validate_translation_multi(
                 program_path, python_code, all_test_cases, cache=cache,
             )
             func_ok = report.all_passed
             validation_time = time.time() - t0_v
+            _dbg(f"validate_multi done ok={func_ok}", program_name, start_time)
             passed_count = report.passed
             sr = passed_count / max(total_test_count, 1)
             if not func_ok:
@@ -1410,6 +1432,7 @@ def process_program(program_path: str) -> None:
                 save_code(program_name, python_code)
                 return
         mon.record_functional(validation_time)
+        _dbg("before final CSV logging", program_name, start_time)
 
         print(f"\n  ✅ Round 0: ALL CHECKS PASSED" if func_ok else
               f"\n  ❌ Round 0: Functional MISMATCH")
@@ -1451,14 +1474,18 @@ def process_program(program_path: str) -> None:
         return
     # ---- end no-repair path -----------------------------------------------
 
+    _dbg("ENTERING repair loop", program_name, start_time)
     # -- repair loop ---------------------------------------------------------
     for round_num in range(cfg.max_repair_rounds):
         elapsed = time.time() - start_time
+        _dbg(f"repair round {round_num}", program_name, start_time)
 
         # ---- 1. Compile check ----------------------------------------------
+        _dbg(f"repair r{round_num} before check_compile", program_name, start_time)
         t0_c = time.time()
         compile_ok, compile_error = check_compile(python_code)
         compile_time = time.time() - t0_c
+        _dbg(f"repair r{round_num} after check_compile ok={compile_ok} ({compile_time:.2f}s)", program_name, start_time)
         mon.record_compile(compile_time)
 
         if round_num == 0:
@@ -1515,11 +1542,12 @@ def process_program(program_path: str) -> None:
                 cache.invalidate_python(python_code)
             continue
 
-        # ---- 2. Runtime check (single quick test first) --------------------
+        _dbg(f"repair r{round_num} before run_python", program_name, start_time)
         t0_r = time.time()
         first_input = all_test_cases[0][0] if all_test_cases else ""
         runtime_ok, runtime_output = run_python(python_code, first_input)
         runtime_time = time.time() - t0_r
+        _dbg(f"repair r{round_num} after run_python ok={runtime_ok} ({runtime_time:.2f}s)", program_name, start_time)
         mon.record_runtime(runtime_time)
 
         if not runtime_ok:
@@ -1572,6 +1600,7 @@ def process_program(program_path: str) -> None:
             continue
 
         # ---- 3. Differential functional validation -------------------------
+        _dbg(f"repair r{round_num} before validate_translation_multi", program_name, start_time)
         t0_v = time.time()
 
         if cfg.validation_strategy == "differential" and total_test_count > 0:
@@ -1583,6 +1612,7 @@ def process_program(program_path: str) -> None:
             )
             func_ok = report.all_passed
             validation_time = time.time() - t0_v
+            _dbg(f"repair r{round_num} after validate_multi ok={func_ok} ({validation_time:.2f}s)", program_name, start_time)
             mon.record_functional(validation_time)
 
             if not func_ok:
@@ -1667,6 +1697,7 @@ def process_program(program_path: str) -> None:
                 return
 
             # Genuine output mismatch — repair
+            _dbg(f"repair r{round_num} functional mismatch - entering repair", program_name, start_time)
             err_type = "FunctionalMismatch"
             err_cat = "semantic"
             last_error_type = err_type
@@ -1680,6 +1711,7 @@ def process_program(program_path: str) -> None:
             passed_count = report.passed if report is not None else _single_passed
             sr = passed_count / max(total_test_count, 1)
 
+            _dbg(f"repair r{round_num} before log_result (functional mismatch)", program_name, start_time)
             log_result(
                 program_name,
                 round_num,
@@ -1701,9 +1733,11 @@ def process_program(program_path: str) -> None:
                 final_error_type=err_type,
                 total_repair_attempts=round_num,
             )
+            _dbg(f"repair r{round_num} after log_result, before fix_code", program_name, start_time)
 
             # Enhanced repair with smart failure compression
             history = _format_repair_history(repair_history_entries)
+            _dbg(f"repair r{round_num} calling fix_code (LLM repair API)", program_name, start_time)
             python_code, _repair_result = fix_code(
                 cpp_code,
                 python_code,
@@ -1721,14 +1755,18 @@ def process_program(program_path: str) -> None:
                 repair_history=history,
                 previous_repair_count=round_num,
             )
+            _dbg(f"repair r{round_num} fix_code returned {len(python_code)} chars", program_name, start_time)
             mon.record_repair(_repair_result.elapsed_seconds)
             mon.record_api_wait(_repair_result.elapsed_seconds)
+            _dbg(f"repair r{round_num} recorded repair timing, appending history", program_name, start_time)
             repair_history_entries.append(
                 f"Round {round_num}: Functional mismatch — {err_cat} "
                 f"({passed_count}/{total_test_count} passed)"
             )
+            _dbg(f"repair r{round_num} before cache invalidate + continue", program_name, start_time)
             if cache:
                 cache.invalidate_python(python_code)
+            _dbg(f"repair r{round_num} continue to next round", program_name, start_time)
             continue
 
         # ---- all checks passed ---------------------------------------------
@@ -1782,6 +1820,7 @@ def process_program(program_path: str) -> None:
         )
         return
 
+    _dbg("EXHAUSTED repair rounds", program_name, start_time)
     # -- exhausted all repair rounds -----------------------------------------
     elapsed = time.time() - start_time
 
