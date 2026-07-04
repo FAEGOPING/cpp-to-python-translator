@@ -1,0 +1,47 @@
+# Experiment Plan — Research Platform v5.0
+# =========================================
+#
+# Each entry is a complete experiment run.  Experiments execute
+# sequentially; each one automatically generates a paper archive
+# under paper_results/.
+#
+# Available options per experiment:
+#   limit       — number of programs (e.g. 20, 100, 500, "all")
+#   repair      — enable iterative LLM repair (bool)
+#   runtime     — enable C++ vs Python runtime comparison (bool)
+#   workers     — override parallel workers (int, default: 4)
+#   repository  — filter by source repository (string or list)
+#   seed        — random seed for reproducible sampling (int)
+
+experiments:
+  # Pilot study — baseline
+  - limit: 20
+    repair: false
+
+  # Pilot study — with repair
+  - limit: 20
+    repair: true
+
+  # Medium-scale — baseline
+  - limit: 100
+    repair: false
+
+  # Medium-scale — with repair
+  - limit: 100
+    repair: true
+
+  # Large-scale — baseline
+  - limit: 500
+    repair: false
+
+  # Large-scale — with repair
+  - limit: 500
+    repair: true
+
+  # Full-scale — baseline
+  - limit: 1000
+    repair: false
+
+  # Full-scale — with repair
+  - limit: 1000
+    repair: true

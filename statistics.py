@@ -148,6 +148,14 @@ class ExperimentStats:
     avg_passed_tests: float = 0.0
     avg_test_success_rate: float = 0.0
 
+    # ---- Token statistics ----
+    total_prompt_tokens: int = 0
+    total_completion_tokens: int = 0
+    total_tokens: int = 0
+    avg_prompt_tokens_per_program: float = 0.0
+    avg_completion_tokens_per_program: float = 0.0
+    avg_tokens_per_program: float = 0.0
+
     # ---- Error distribution ----
     error_counts: Dict[str, int] = field(default_factory=dict)
     """ErrorType → count."""
@@ -364,6 +372,26 @@ def compute_stats(
         stats.avg_passed_tests = sum(passed_tests) / len(passed_tests)
     if test_rates:
         stats.avg_test_success_rate = sum(test_rates) / len(test_rates) * 100
+
+    # ---- Token statistics (from summary rows) ----
+    token_prompts: list[int] = []
+    token_completions: list[int] = []
+    token_totals: list[int] = []
+    for r in source_rows:
+        pt = _safe_int(r.get("PromptTokens", r.get("prompt_tokens", 0)))
+        ct = _safe_int(r.get("CompletionTokens", r.get("completion_tokens", 0)))
+        tt = _safe_int(r.get("TotalTokens", r.get("total_tokens", 0)))
+        if pt > 0 or ct > 0:
+            token_prompts.append(pt)
+            token_completions.append(ct)
+            token_totals.append(tt)
+    stats.total_prompt_tokens = sum(token_prompts)
+    stats.total_completion_tokens = sum(token_completions)
+    stats.total_tokens = sum(token_totals)
+    n_token = max(len(token_prompts), 1)
+    stats.avg_prompt_tokens_per_program = stats.total_prompt_tokens / n_token
+    stats.avg_completion_tokens_per_program = stats.total_completion_tokens / n_token
+    stats.avg_tokens_per_program = stats.total_tokens / n_token
 
     # ---- Error distribution (from detail rows) ----
     error_counter: Counter = Counter()

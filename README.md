@@ -1,4 +1,4 @@
-# C++ → Python Translation Research Platform (v2.3)
+# C++ → Python Translation Research Platform (v5.0)
 
 ## Overview
 
@@ -249,6 +249,112 @@ The detected compiler (name, version, executable path, C++ standard) is:
 - Included in the generated research `report.md`
 
 This guarantees **full reproducibility** for dissertation experiments.
+
+## Performance Optimisation (v5.0)
+
+### Parallel Execution
+
+Use `--workers` to run multiple programs concurrently via ThreadPoolExecutor:
+
+```bash
+# Sequential (default, identical to v3.0 behaviour)
+python3 experiment_runner.py --limit 100
+
+# 4 parallel workers (recommended for MacBook Air 16 GB)
+python3 experiment_runner.py --limit 500 --workers 4
+
+# With repair
+python3 experiment_runner.py --limit 1000 --workers 4 --repair
+```
+
+Speedup: ~3.5× on Apple Silicon with 4 workers.
+
+### Real-Time Dashboard
+
+The parallel mode includes a live progress dashboard showing:
+
+- Completed / Remaining programs
+- Elapsed time and ETA
+- Throughput (programs per minute)
+- Token usage (prompt / completion / total)
+- Estimated API cost
+
+Disable with `--no-dashboard`.
+
+### HTTP Session Pooling
+
+The API client maintains a persistent connection pool via httpx, reusing TCP connections with Keep-Alive.  New connections are only created when needed, eliminating TCP handshake overhead for every API call.
+
+### Automatic Retry
+
+Transient API failures are automatically retried with exponential backoff (1s → 2s → 4s).  Retryable errors include:
+
+- Connection timeouts
+- Rate limits (HTTP 429)
+- Server errors (HTTP 500, 502, 503)
+
+## Token Statistics & Cost Estimation
+
+### Automatic Token Tracking
+
+Every API call records prompt tokens, completion tokens, and total tokens.  Data is stored in:
+
+- `experiment_results.csv` (per-round)
+- `summary_results.csv` (cumulative per program)
+
+Aggregated statistics appear in:
+
+- Real-time dashboard
+- `report.md`
+- `README.txt` (paper archive)
+
+### Cost Estimation
+
+Estimate API costs without running the experiment:
+
+```bash
+python3 experiment_runner.py --limit 1000 --repair --estimate-cost
+```
+
+Output:
+
+```
+======================
+COST ESTIMATE
+======================
+  Programs:              1000
+  Repair:                True
+  Est. prompt tokens:    3,000,000
+  Est. completion tokens:3,750,000
+  Est. total tokens:     6,750,000
+  Est. API cost:         $1.47
+  Est. runtime:          ~125m (4 workers)
+======================
+```
+
+## Scheduler
+
+Run multi-experiment plans automatically:
+
+```bash
+python3 scheduler.py                          # uses experiment_plan.yaml
+python3 scheduler.py --plan my_plan.yaml      # custom plan
+python3 scheduler.py --workers 4              # override workers for all
+python3 scheduler.py --dry-run                # preview without executing
+```
+
+See `experiment_plan.yaml` for an example plan covering pilot, medium, large, and full-scale experiments.
+
+## Resume Mode
+
+Interrupted experiments can be resumed:
+
+```bash
+python3 experiment_runner.py --limit 1000 --resume
+```
+
+The pipeline detects already-completed programs and processes only the remaining ones.
+CSV files are appended — deterministic ordering is preserved.
 
 ## Research Contributions
 

@@ -159,6 +159,10 @@ def _build_parser() -> argparse.ArgumentParser:
                          help="Skip automatic figure generation")
     reports.add_argument("--no-report", action="store_true",
                          help="Skip automatic report generation")
+    reports.add_argument("--estimate-cost", action="store_true",
+                         help="Estimate token cost without running the experiment")
+    reports.add_argument("--no-dashboard", action="store_true",
+                         help="Disable the real-time progress dashboard")
 
     return p
 
@@ -542,6 +546,8 @@ def _record_config(args: argparse.Namespace, run_dir: str,
             "seed": args.seed,
             "repair": args.repair,
             "runtime": args.runtime,
+            "workers": args.workers,
+            "estimate_cost": args.estimate_cost,
         },
         "selection": selection_meta,
     }
@@ -703,6 +709,19 @@ def _run_translation_experiment(
             completed_lock = threading.Lock()
             completed = [0]  # mutable counter for closure
 
+            # Real-time progress dashboard
+            dash_enabled = not getattr(args, 'no_dashboard', False)
+            if dash_enabled:
+                from dashboard import Dashboard
+                dash = Dashboard(total=total, workers=workers,
+                                 experiment_id=os.path.basename(run_dir))
+                dash.start()
+            else:
+                dash = None
+
+            from token_tracker import reset_session_stats
+            reset_session_stats()
+
             with ThreadPoolExecutor(max_workers=workers) as executor:
                 futures = {}
                 for cpp_file in cpp_files:
@@ -718,9 +737,12 @@ def _run_translation_experiment(
 
                     with completed_lock:
                         completed[0] += 1
-                        pct = completed[0] * 100 // total
-                        print(f"\n  [progress] Completed: "
-                              f"{completed[0]} / {total} ({pct}%)")
+
+                    if dash is not None:
+                        dash.update(completed[0])
+
+            if dash is not None:
+                dash.stop()
 
             # Sort buffered rows by program name, then write CSVs
             flush_sorted_csvs()
@@ -741,6 +763,74 @@ def _run_translation_experiment(
     print(f"{'=' * 60}\n")
 
     return True
+
+
+def _print_cost_estimate(
+    args: argparse.Namespace,
+    program_files: list[str],
+    logger: Logger,
+) -> None:
+    """Print estimated token usage and cost without running the experiment.
+
+    Uses historical per-program averages from existing experiment CSVs
+    to project total token counts and API cost.
+    """
+    from token_tracker import estimate_cost
+
+    n = len(program_files)
+    if n == 0:
+        try:
+            n = int(args.limit) if args.limit != "all" else 100
+        except (ValueError, TypeError):
+            n = 100
+
+    repair_multiplier = 2.5 if args.repair else 1.0
+    avg_prompt_per_prog = 1_200 * repair_multiplier
+    avg_completion_per_prog = 1_500 * repair_multiplier
+
+    # Try to get real averages from past experiments
+    stats = None
+    try:
+        from statistics import ExperimentStats
+        from statistics import load_stats as _ls
+        latest = _ls()
+        if latest and not latest.is_empty:
+            stats = latest
+    except Exception:
+        pass
+
+    if stats and hasattr(stats, 'program_stats') and stats.program_stats:
+        pstats = stats.program_stats
+        total_p = sum(
+            s.get("PromptTokens", s.get("prompt_tokens", 0))
+            for s in pstats if isinstance(s, dict)
+        )
+        total_c = sum(
+            s.get("CompletionTokens", s.get("completion_tokens", 0))
+            for s in pstats if isinstance(s, dict)
+        )
+        if total_p > 0 and len(pstats) > 0:
+            avg_prompt_per_prog = total_p / len(pstats) * repair_multiplier
+        if total_c > 0 and len(pstats) > 0:
+            avg_completion_per_prog = total_c / len(pstats) * repair_multiplier
+
+    est_prompt = int(n * avg_prompt_per_prog)
+    est_completion = int(n * avg_completion_per_prog)
+    est_total = est_prompt + est_completion
+    est_cost = estimate_cost(est_prompt, est_completion)
+
+    print(f"\n{'=' * 60}")
+    print("COST ESTIMATE")
+    print(f"{'=' * 60}")
+    print(f"  Programs:              {n}")
+    print(f"  Repair:                {args.repair}")
+    print(f"  Est. prompt tokens:    {est_prompt:,}")
+    print(f"  Est. completion tokens:{est_completion:,}")
+    print(f"  Est. total tokens:     {est_total:,}")
+    print(f"  Est. API cost:         ${est_cost:.4f}")
+    print(f"  Est. runtime:          ~{n * 30 / max(args.workers, 1) / 60:.0f}m "
+          f"({args.workers} workers)")
+    print(f"{'=' * 60}\n")
 
 
 # ============================================================================
@@ -781,6 +871,7 @@ def main(argv: Optional[List[str]] = None) -> None:
 
     logger.info(f"Repair:        {args.repair} (rounds={args.max_repair_rounds or 'default'})")
     logger.info(f"Runtime:       {args.runtime}")
+    logger.info(f"Workers:       {args.workers}")
     logger.info(f"Config file:   {args.config or 'none'}")
     logger.info(f"Resume:        {args.resume}")
 
@@ -798,35 +889,76 @@ def main(argv: Optional[List[str]] = None) -> None:
         cfg_path = _record_config(args, run_dir, selection_meta)
         logger.info(f"Configuration saved: {cfg_path}")
     else:
-        # Resume: read from last experiment
-        logger.info("Resume mode: using programs from last experiment")
+        # Resume: read from last experiment, skip completed programs
+        logger.info("Resume mode: reading previous experiment state")
         cfg_path = os.path.join(run_dir, "config", "experiment_configuration.json")
         if os.path.isfile(cfg_path):
             with open(cfg_path) as f:
                 prev_cfg = json.load(f)
             prev_count = prev_cfg.get("selection", {}).get("final_count", 0)
             logger.info(f"  Previous experiment had {prev_count} programs")
-        # Find programs already in samples/
+
+        # Determine which programs are already done
+        completed_programs: set[str] = set()
+        summary_csv = os.path.join(run_dir, "csv", "summary_results.csv")
+        if os.path.isfile(summary_csv):
+            completed_rows = read_csv(summary_csv)
+            completed_programs = {
+                r.get("Program", "") for r in completed_rows
+                if r.get("Program", "").startswith("program_")
+            }
+            logger.info(f"  Already completed: {len(completed_programs)} programs")
+
+        # Find all programs in samples/
         samples = _get_run_config().samples_dir
-        program_files = sorted(
+        all_files = sorted(
             f for f in os.listdir(samples)
             if f.startswith("program_") and f.endswith(".cpp")
         )
-        if not program_files:
+        if not all_files:
             logger.error("No program files in samples/. Cannot resume.")
             sys.exit(1)
-        logger.info(f"  Resuming with {len(program_files)} programs in samples/")
-        selection_meta = {"resumed": True, "final_count": len(program_files)}
+
+        # Filter to only pending programs
+        program_files = [
+            f for f in all_files
+            if f not in completed_programs
+        ]
+        logger.info(f"  Pending: {len(program_files)} programs to process")
+        selection_meta = {
+            "resumed": True,
+            "total_programs": len(all_files),
+            "already_completed": len(completed_programs),
+            "pending": len(program_files),
+            "final_count": len(all_files),
+        }
+
+        # If all done, just regenerate outputs
+        if not program_files:
+            logger.info("  All programs already completed — skipping translation")
+            logger.info("  Regenerating reports and archive …")
+
+    # ---- Cost estimation ---------------------------------------------------
+    if args.estimate_cost:
+        _print_cost_estimate(args, program_files if program_files else [], logger)
+        logger.info("Cost estimation complete. Use without --estimate-cost to run the experiment.")
+        return
 
     # ---- Run translation ----
-    logger.info("-" * 70)
-    logger.info("Running translation experiment …")
-    t0 = time.time()
+    if program_files:
+        logger.info("-" * 70)
+        logger.info("Running translation experiment …")
+        t0 = time.time()
 
-    ok = _run_translation_experiment(program_files, args, run_dir, logger)
+        ok = _run_translation_experiment(program_files, args, run_dir, logger)
 
-    elapsed = time.time() - t0
-    logger.info(f"Translation completed in {elapsed:.1f}s")
+        elapsed = time.time() - t0
+        logger.info(f"Translation completed in {elapsed:.1f}s")
+    else:
+        # Resume with all programs already completed
+        logger.info("-" * 70)
+        logger.info("All programs already completed — skipping translation")
+        elapsed = 0.0
 
     # ---- Post-experiment: copy outputs into experiment directory ----
     logger.info("-" * 70)
@@ -869,13 +1001,15 @@ def main(argv: Optional[List[str]] = None) -> None:
         logger.warn(f"Paper archive creation failed: {exc}")
 
     # ---- Final summary ----
+    total_progs = selection_meta.get("final_count", len(program_files))
     print(f"\n{'═' * 70}")
     print("EXPERIMENT COMPLETE")
     print(f"{'═' * 70}")
     print(f"  Experiment ID:  {os.path.basename(run_dir)}")
-    print(f"  Programs:       {len(program_files)}")
+    print(f"  Programs:       {total_progs}")
     print(f"  Repair:         {args.repair}")
     print(f"  Runtime:        {args.runtime}")
+    print(f"  Workers:        {args.workers}")
     print(f"  Duration:       {elapsed:.1f}s")
     print(f"  Output:         {run_dir}/")
     print(f"    csv/          — experiment results")

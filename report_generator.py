@@ -189,6 +189,25 @@ def generate_report(
             lines.append(f"| Average Total Time | {stats.avg_total_time:.2f}s |")
             lines.append("")
 
+        # Token Statistics & Cost
+        if stats.total_prompt_tokens > 0 or stats.total_tokens > 0:
+            try:
+                from token_tracker import estimate_cost
+                cost = estimate_cost(stats.total_prompt_tokens,
+                                     stats.total_completion_tokens)
+                cost_str = f"${cost:.4f}"
+            except Exception:
+                cost_str = "N/A"
+            lines += ["### Token Usage & Cost", ""]
+            lines += ["| Metric | Value |", "|--------|-------|"]
+            lines.append(f"| Total Prompt Tokens | {stats.total_prompt_tokens:,} |")
+            lines.append(f"| Total Completion Tokens | {stats.total_completion_tokens:,} |")
+            lines.append(f"| Total Tokens | {stats.total_tokens:,} |")
+            lines.append(f"| Avg Prompt/Program | {stats.avg_prompt_tokens_per_program:.0f} |")
+            lines.append(f"| Avg Completion/Program | {stats.avg_completion_tokens_per_program:.0f} |")
+            lines.append(f"| Estimated API Cost | {cost_str} |")
+            lines.append("")
+
         # Repair
         if stats.has_repair_data:
             lines += ["### Repair Results", ""]

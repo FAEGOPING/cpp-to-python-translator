@@ -281,6 +281,24 @@ def _generate_readme(
     repair_rounds = _nvl(_safe_attr(stats, "avg_repair_rounds"))
     programs_repaired = _nvl(_safe_attr(stats, "programs_repaired"))
 
+    # Token statistics
+    total_prompt = _nvl(_safe_attr(stats, "total_prompt_tokens"))
+    total_completion = _nvl(_safe_attr(stats, "total_completion_tokens"))
+    total_tok = _nvl(_safe_attr(stats, "total_tokens"))
+    avg_prompt = _fmt_avg(_safe_attr(stats, "avg_prompt_tokens_per_program"))
+    avg_completion = _fmt_avg(_safe_attr(stats, "avg_completion_tokens_per_program"))
+
+    # Cost estimation
+    est_cost = "N/A"
+    try:
+        from token_tracker import estimate_cost
+        pt = _safe_attr(stats, "total_prompt_tokens")
+        ct = _safe_attr(stats, "total_completion_tokens")
+        if pt is not None and ct is not None:
+            est_cost = f"${estimate_cost(int(pt), int(ct)):.4f}"
+    except Exception:
+        pass
+
     # ---- write ----
     lines = textwrap.dedent(f"""\
     ================================================================================
@@ -302,6 +320,13 @@ def _generate_readme(
     Average Runtime:         {avg_runtime}
     Repair Attempts:         {repair_rounds}
     Programs Repaired:       {programs_repaired}
+
+    Total Prompt Tokens:     {total_prompt}
+    Total Completion Tokens: {total_completion}
+    Total Tokens:            {total_tok}
+    Avg Prompt/Program:      {avg_prompt}
+    Avg Completion/Program:  {avg_completion}
+    Estimated API Cost:      {est_cost}
 
     Output Directory:        paper_results/{archive_dir.name}/
 
@@ -368,5 +393,15 @@ def _fmt_sec(value: object) -> str:
         return "N/A"
     try:
         return f"{float(value):.1f}s"
+    except (ValueError, TypeError):
+        return "N/A"
+
+
+def _fmt_avg(value: object) -> str:
+    """Format a float with one decimal, or ``"N/A"``."""
+    if value is None:
+        return "N/A"
+    try:
+        return f"{float(value):.1f}"
     except (ValueError, TypeError):
         return "N/A"

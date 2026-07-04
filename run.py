@@ -144,7 +144,10 @@ def _sort_key(program_name: str) -> tuple:
             key.append((1, p.lower()))
     return tuple(key)
 
-from gpt_api import call_gpt
+from gpt_api import call_gpt, call_gpt_structured, CallResult
+from token_tracker import (
+    reset_program_tokens, get_program_tokens, get_last_call_tokens,
+)
 
 # Framework modules
 from config import Config, DEFAULT_CONFIG, _resolve_legacy
@@ -453,14 +456,14 @@ def run_cpp(cpp_file: str, test_input: str) -> tuple[bool, str]:
 # Translation prompt (original — preserved)
 # ============================================================================
 
-def translate_cpp(cpp_code: str) -> str:
+def translate_cpp(cpp_code: str) -> "tuple[str, CallResult]":
     """Translate C++ source code to Python via the LLM.
 
     Args:
         cpp_code: Full C++ source code as a string.
 
     Returns:
-        LLM-generated Python source code.
+        ``(python_code, api_result)`` tuple with token + timing data.
     """
     prompt = f"""\
 You are an expert software engineer.
@@ -477,7 +480,8 @@ C++ Code:
 
 {cpp_code}"""
 
-    return call_gpt(prompt)
+    result = call_gpt_structured(prompt)
+    return result.text, result
 
 
 # ============================================================================
@@ -632,7 +636,8 @@ Requirements:
 4. Do **not** include explanations, markdown fences, or comments."""
     )
 
-    return call_gpt("\n\n".join(prompt_parts))
+    result = call_gpt_structured("\n\n".join(prompt_parts))
+    return result.text, result
 
 
 # ============================================================================
@@ -872,6 +877,9 @@ _EXPERIMENT_HEADER_EXTENDED = [
     "FailureReason",
     "FinalErrorType",
     "TotalRepairAttempts",
+    "PromptTokens",
+    "CompletionTokens",
+    "TotalTokens",
 ]
 
 
@@ -962,6 +970,9 @@ def log_result(
             failure_reason or "",
             final_error_type or "",
             total_repair_attempts if total_repair_attempts is not None else "",
+            get_last_call_tokens()[0],
+            get_last_call_tokens()[1],
+            get_last_call_tokens()[2],
         ])
 
     if _buffer_mode:
@@ -1010,6 +1021,9 @@ _SUMMARY_HEADER_EXTENDED = [
     "FinalErrorType",
     "ErrorCategory",
     "TotalRepairAttempts",
+    "PromptTokens",
+    "CompletionTokens",
+    "TotalTokens",
 ]
 
 
@@ -1088,6 +1102,9 @@ def log_summary(
             final_error_type or "",
             error_category or "",
             total_repair_attempts if total_repair_attempts is not None else "",
+            get_last_call_tokens()[0],
+            get_last_call_tokens()[1],
+            get_last_call_tokens()[2],
         ])
 
     if _buffer_mode:
@@ -1134,6 +1151,7 @@ def process_program(program_path: str) -> None:
     """
     cfg = _cfg()
     program_name = os.path.basename(program_path)
+    reset_program_tokens()
 
     print(f"\n{'=' * 60}")
     print(f"Processing: {program_name}")
@@ -1184,7 +1202,7 @@ def process_program(program_path: str) -> None:
     start_time = time.time()
     print("\n  Generating initial translation …")
     t0 = time.time()
-    python_code = translate_cpp(cpp_code)
+    python_code, _trans_result = translate_cpp(cpp_code)
     translation_time = time.time() - t0
 
     initial_compile_pass: bool = False
@@ -1237,7 +1255,7 @@ def process_program(program_path: str) -> None:
 
             # Repair
             history = _format_repair_history(repair_history_entries)
-            python_code = fix_code(
+            python_code, _repair_result = fix_code(
                 cpp_code,
                 python_code,
                 compile_error=compile_error,
@@ -1291,7 +1309,7 @@ def process_program(program_path: str) -> None:
             )
 
             history = _format_repair_history(repair_history_entries)
-            python_code = fix_code(
+            python_code, _repair_result = fix_code(
                 cpp_code,
                 python_code,
                 runtime_error=runtime_output,
@@ -1438,7 +1456,7 @@ def process_program(program_path: str) -> None:
 
             # Enhanced repair with smart failure compression
             history = _format_repair_history(repair_history_entries)
-            python_code = fix_code(
+            python_code, _repair_result = fix_code(
                 cpp_code,
                 python_code,
                 functional_mismatch=mismatch if mismatch else compact,
