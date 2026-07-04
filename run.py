@@ -1214,6 +1214,7 @@ def process_program(program_path: str) -> None:
     repair_history_entries: list[str] = []
     last_error_type: str = "None"
     last_error_category: str = "unknown"
+    compile_ok: bool = False  # safe default when max_repair_rounds == 0
 
     # -- repair loop ---------------------------------------------------------
     for round_num in range(cfg.max_repair_rounds):
