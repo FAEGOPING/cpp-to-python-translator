@@ -35,5 +35,8 @@ experiment_results/
 # Paper archive — generated experiment snapshots
 paper_results/
 
+# Skip list — persistent failure records
+skip_programs.json
+
 # Translation cache — reusable LLM translations
 translation_cache/

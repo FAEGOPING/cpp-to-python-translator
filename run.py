@@ -149,6 +149,7 @@ def _sort_key(program_name: str) -> tuple:
 
 from gpt_api import call_gpt, call_gpt_structured, CallResult
 from perf_monitor import get_monitor
+from skip_list import record_failure as _record_skip
 from token_tracker import (
     reset_program_tokens, get_program_tokens, get_last_call_tokens,
 )
@@ -1908,7 +1909,20 @@ def process_program(program_path: str) -> None:
         elapsed = time.time() - start_time
         exc_name = type(_exc).__name__
         reason = f"{exc_name}: {str(_exc)[:200]}"
-        print(f"\n  \u26a0 Sample failed.")
+
+        # ---- record persistent infrastructure failures in the skip list ----
+        if stage in ("translation", "repair"):
+            is_timeout = "timeout" in exc_name.lower()
+            skip_reason = (
+                f"{'Translation' if stage == 'translation' else 'Repair'}"
+                f"{'Timeout' if is_timeout else 'APIError'}"
+            )
+            try:
+                _record_skip(program_name, skip_reason)
+            except Exception:
+                pass
+
+        print(f"\n  ⚠ Sample failed.")
         print(f"     Stage:   {stage}")
         print(f"     Reason:  {exc_name}")
         print(f"     Continuing experiment...")

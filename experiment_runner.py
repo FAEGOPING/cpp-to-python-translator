@@ -126,6 +126,10 @@ def _build_parser() -> argparse.ArgumentParser:
                          help="Custom output directory (overrides timestamped dir)")
     general.add_argument("--workers", type=int, default=1,
                          help="Number of parallel workers (default: 1, sequential)")
+    general.add_argument("--skip-failed", action="store_true",
+                         help="Skip programs recorded in skip_programs.json")
+    general.add_argument("--clear-skip-list", action="store_true",
+                         help="Delete the skip list before running")
 
     # -- Selection ----------------------------------------------------------
     selection = p.add_argument_group("Program Selection")
@@ -678,6 +682,23 @@ def _run_translation_experiment(
 
     total = len(cpp_files)
 
+    # ---- Skip-list filtering ----
+    if getattr(args, 'skip_failed', False):
+        from skip_list import should_skip as _should_skip
+        skipped: list[str] = []
+        kept: list[str] = []
+        for cf in cpp_files:
+            reason = _should_skip(os.path.basename(cf))
+            if reason is not None:
+                skipped.append(os.path.basename(cf))
+                print(f"  Skipping {os.path.basename(cf)}  — {reason}")
+            else:
+                kept.append(cf)
+        if skipped:
+            print(f"  Skipped {len(skipped)} program(s), {len(kept)} remaining.")
+        cpp_files = kept
+        total = len(cpp_files)
+
     # Determine worker count
     workers = max(1, args.workers)
 
@@ -896,6 +917,26 @@ def main(argv: Optional[List[str]] = None) -> None:
     logger.info(f"Workers:       {args.workers}")
     logger.info(f"Config file:   {args.config or 'none'}")
     logger.info(f"Resume:        {args.resume}")
+
+    # ---- Skip list ----
+    from skip_list import (
+        clear_skip_list as _clear_skip_list,
+        load_skip_list as _load_skip_list,
+        skip_count as _skip_count,
+    )
+    if args.clear_skip_list:
+        _clear_skip_list()
+        logger.info("Skip list cleared.")
+
+    _skip_map = _load_skip_list()
+    _sc = _skip_count()
+    if _sc > 0:
+        logger.info(f"Skip list:     {_sc} program(s)")
+        if args.skip_failed:
+            for prog, reason in sorted(_skip_map.items())[:10]:
+                logger.info(f"  {prog:30s}  → {reason}")
+            if _sc > 10:
+                logger.info(f"  ... and {_sc - 10} more")
 
     # ---- Program selection ----
     if not args.resume:
