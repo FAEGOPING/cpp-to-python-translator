@@ -164,6 +164,17 @@ def _build_parser() -> argparse.ArgumentParser:
     reports.add_argument("--no-dashboard", action="store_true",
                          help="Disable the real-time progress dashboard")
 
+    # -- Translation cache ---------------------------------------------------
+    cache = p.add_argument_group("Translation Cache")
+    cache.add_argument("--cache-read", action="store_true", default=True,
+                       help="Enable reading from translation cache (default)")
+    cache.add_argument("--no-cache-read", action="store_true",
+                       help="Disable reading from translation cache")
+    cache.add_argument("--cache-write", action="store_true", default=True,
+                       help="Enable writing to translation cache (default)")
+    cache.add_argument("--no-cache-write", action="store_true",
+                       help="Disable writing to translation cache")
+
     return p
 
 
@@ -955,6 +966,14 @@ def main(argv: Optional[List[str]] = None) -> None:
         logger.info("Cost estimation complete. Use without --estimate-cost to run the experiment.")
         return
 
+    # ---- Configure translation cache ----
+    from translation_cache import configure as _cache_configure
+    _cache_read = not args.no_cache_read
+    _cache_write = not args.no_cache_write
+    _cache_configure(read=_cache_read, write=_cache_write)
+    logger.info(f"Cache read:    {_cache_read}")
+    logger.info(f"Cache write:   {_cache_write}")
+
     # ---- Run translation ----
     if program_files:
         logger.info("-" * 70)
@@ -1022,6 +1041,15 @@ def main(argv: Optional[List[str]] = None) -> None:
     print(f"  Runtime:        {args.runtime}")
     print(f"  Workers:        {args.workers}")
     print(f"  Duration:       {elapsed:.1f}s")
+
+    # Cache statistics
+    from translation_cache import get_stats as _cache_stats
+    _hits, _misses, _writes = _cache_stats()
+    if _hits > 0 or _misses > 0:
+        print(f"  Cache Hits:     {_hits}")
+        print(f"  Cache Misses:   {_misses}")
+        print(f"  Cache Writes:   {_writes}")
+
     print(f"  Output:         {run_dir}/")
     print(f"    csv/          — experiment results")
     print(f"    reports/      — generated reports")

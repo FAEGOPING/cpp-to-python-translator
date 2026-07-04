@@ -152,6 +152,7 @@ from perf_monitor import get_monitor
 from token_tracker import (
     reset_program_tokens, get_program_tokens, get_last_call_tokens,
 )
+from translation_cache import lookup as _cache_lookup, save as _cache_save
 
 # Framework modules
 from config import Config, DEFAULT_CONFIG, _resolve_legacy
@@ -1205,10 +1206,21 @@ def process_program(program_path: str) -> None:
 
     # -- initial translation -------------------------------------------------
     start_time = time.time()
-    print("\n  Generating initial translation …")
-    t0 = time.time()
-    python_code, _trans_result = translate_cpp(cpp_code)
-    translation_time = time.time() - t0
+
+    # Try translation cache first (avoids unnecessary LLM API calls)
+    cached = _cache_lookup(program_name)
+    if cached is not None:
+        python_code = cached
+        translation_time = 0.0
+        _trans_result = CallResult(text=cached, prompt_tokens=0,
+                                    completion_tokens=0, total_tokens=0,
+                                    elapsed_seconds=0.0, retry_count=0)
+    else:
+        print("  Generating initial translation …")
+        t0 = time.time()
+        python_code, _trans_result = translate_cpp(cpp_code)
+        translation_time = time.time() - t0
+        _cache_save(program_name, python_code)
 
     initial_compile_pass: bool = False
     repair_history_entries: list[str] = []

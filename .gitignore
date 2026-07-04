@@ -34,3 +34,6 @@ experiment_results/
 
 # Paper archive — generated experiment snapshots
 paper_results/
+
+# Translation cache — reusable LLM translations
+translation_cache/
