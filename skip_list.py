@@ -1,20 +1,25 @@
 """
-skip_list.py — Persistent Skip List for Failed Programs
-=========================================================
+skip_list.py — Persistent Skip List for Failed Programs (v2.0)
+================================================================
 
 Maintains a JSON file (``skip_programs.json``) mapping program
-filenames to their failure reason.  Programs with persistent
-infrastructure failures (API timeout / API error) are automatically
-recorded and can be skipped in future runs.
+filenames to their failure metadata.  Programs with persistent
+infrastructure failures are automatically recorded and can be
+skipped in future runs.
+
+V2.0: Rich records with timeout_count.  A program only enters the
+skip list after TWO consecutive infrastructure failures on
+different runs.  Old flat-format files are migrated automatically.
 
 Usage::
 
     from skip_list import should_skip, record_failure, load_skip_list, clear_skip_list
 
-    if should_skip(program_name):
+    reason = should_skip(program_name)
+    if reason is not None:
         continue  # immediately skip this sample
 
-    record_failure(program_name, "RepairTimeout")
+    record_failure(program_name, "RepairTimeout", "repair")
 """
 
 from __future__ import annotations
@@ -22,20 +27,26 @@ from __future__ import annotations
 import json
 import os
 import threading
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 SKIP_FILE = PROJECT_ROOT / "skip_programs.json"
 
 _lock = threading.Lock()
-_skip_map: dict[str, str] | None = None  # None = not loaded yet
+_skip_map: dict[str, dict[str, Any]] | None = None
 
 
-def load_skip_list() -> dict[str, str]:
-    """Load the skip list from disk (lazy, cached).
+def _now_utc() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+def load_skip_list() -> dict[str, dict[str, Any]]:
+    """Load + migrate the skip list from disk (lazy, cached).
 
     Returns:
-        Dict mapping ``program_000123.cpp`` → ``"RepairTimeout"`` etc.
+        Dict mapping ``program_000123.cpp`` → ``{reason, count, stage, ...}``.
     """
     global _skip_map
     if _skip_map is not None:
@@ -46,15 +57,31 @@ def load_skip_list() -> dict[str, str]:
         if SKIP_FILE.is_file():
             try:
                 with open(SKIP_FILE, encoding="utf-8") as fh:
-                    _skip_map = json.load(fh)
+                    raw = json.load(fh)
             except (json.JSONDecodeError, OSError):
-                _skip_map = {}
+                raw = {}
         else:
-            _skip_map = {}
+            raw = {}
+
+        # Migrate flat records → rich records
+        migrated = False
+        for k, v in raw.items():
+            if isinstance(v, str):
+                raw[k] = {
+                    "reason": v,
+                    "count": 1,
+                    "stage": "unknown",
+                    "first_seen": _now_utc(),
+                    "last_seen": _now_utc(),
+                }
+                migrated = True
+        if migrated:
+            _save_skip_list(raw)
+        _skip_map = raw
     return _skip_map
 
 
-def _save_skip_list(data: dict[str, str]) -> None:
+def _save_skip_list(data: dict[str, Any]) -> None:
     """Persist the skip list to disk (atomic via temp + rename)."""
     try:
         tmp = str(SKIP_FILE) + ".tmp"
@@ -62,38 +89,64 @@ def _save_skip_list(data: dict[str, str]) -> None:
             json.dump(data, fh, indent=2)
         os.replace(tmp, str(SKIP_FILE))
     except OSError:
-        pass  # best-effort
+        pass
 
 
 def should_skip(program_name: str) -> str | None:
     """Check whether *program_name* should be skipped.
 
+    A program is only skipped when its failure count >= 2 (two
+    confirmations on separate runs).
+
     Args:
         program_name: e.g. ``"program_000029.cpp"``.
 
     Returns:
-        The failure reason string (e.g. ``"RepairTimeout"``), or
-        ``None`` if the program is not in the skip list.
+        The failure reason string, or ``None`` if not in skip list
+        or count < 2.
     """
-    return load_skip_list().get(program_name)
+    entry = load_skip_list().get(program_name)
+    if entry is None:
+        return None
+    if entry.get("count", 1) < 2:
+        return None
+    return str(entry.get("reason", "Unknown"))
 
 
-def record_failure(program_name: str, reason: str) -> None:
-    """Persistently record a program failure.
+def record_failure(
+    program_name: str,
+    reason: str,
+    stage: str = "unknown",
+) -> None:
+    """Record a program failure, incrementing its timeout_count.
 
-    Only records infrastructure failures (API timeout / API error).
-    Idempotent — re-recording the same program is a no-op.
+    - First failure: count=1, NOT added to skip list.
+    - Second failure: count=2, NOW added to skip list.
+    - Subsequent: count incremented.
 
     Args:
         program_name: e.g. ``"program_000029.cpp"``.
         reason: One of ``RepairTimeout``, ``TranslationTimeout``,
             ``RepairAPIError``, ``TranslationAPIError``.
+        stage: Pipeline stage where the failure occurred.
     """
     data = load_skip_list()
-    if data.get(program_name) == reason:
-        return  # already recorded
+    now = _now_utc()
     with _lock:
-        data[program_name] = reason
+        entry = data.get(program_name)
+        if entry is None:
+            data[program_name] = {
+                "reason": reason,
+                "count": 1,
+                "stage": stage,
+                "first_seen": now,
+                "last_seen": now,
+            }
+        else:
+            entry["count"] = entry.get("count", 0) + 1
+            entry["last_seen"] = now
+            entry["reason"] = reason
+            entry["stage"] = stage
         _save_skip_list(data)
 
 

@@ -931,10 +931,19 @@ def main(argv: Optional[List[str]] = None) -> None:
     _skip_map = _load_skip_list()
     _sc = _skip_count()
     if _sc > 0:
-        logger.info(f"Skip list:     {_sc} program(s)")
+        # Count programs that would actually be skipped (count >= 2)
+        skippable = sum(1 for v in _skip_map.values()
+                        if isinstance(v, dict) and v.get("count", 0) >= 2)
+        logger.info(f"Skip list:     {_sc} program(s) ({skippable} skippable)")
         if args.skip_failed:
-            for prog, reason in sorted(_skip_map.items())[:10]:
-                logger.info(f"  {prog:30s}  → {reason}")
+            for prog, entry in sorted(_skip_map.items())[:10]:
+                if isinstance(entry, dict):
+                    reason = entry.get("reason", "?")
+                    cnt = entry.get("count", 0)
+                else:
+                    reason = str(entry)
+                    cnt = 1
+                logger.info(f"  {prog:30s}  → {reason} (×{cnt})")
             if _sc > 10:
                 logger.info(f"  ... and {_sc - 10} more")
 
@@ -1073,24 +1082,66 @@ def main(argv: Optional[List[str]] = None) -> None:
 
     # ---- Final summary ----
     total_progs = selection_meta.get("final_count", len(program_files))
+    from statistics import load_stats as _load_exp_stats
+    _exp_stats = _load_exp_stats(run_dir)
+
     print(f"\n{'═' * 70}")
     print("EXPERIMENT COMPLETE")
     print(f"{'═' * 70}")
-    print(f"  Experiment ID:  {os.path.basename(run_dir)}")
-    print(f"  Programs:       {total_progs}")
-    print(f"  Repair:         {args.repair}")
-    print(f"  Runtime:        {args.runtime}")
-    print(f"  Workers:        {args.workers}")
-    print(f"  Duration:       {elapsed:.1f}s")
+    print(f"  Experiment ID:         {os.path.basename(run_dir)}")
+    print(f"  Programs:              {total_progs}")
+    print(f"  Repair:                {args.repair}")
+    print(f"  Runtime:               {args.runtime}")
+    print(f"  Workers:               {args.workers}")
+    print(f"  Duration:              {elapsed:.1f}s")
+    print(f"")
+
+    # Research metrics
+    if not _exp_stats.is_empty:
+        p = _exp_stats.total_programs
+        print(f"  {'─' * 50}")
+        print(f"  RESEARCH METRICS")
+        print(f"  {'─' * 50}")
+        print(f"  Compile Success:       {_exp_stats.compile_pass}/{p} ({_exp_stats.compile_success_rate:.1f}%)")
+        print(f"  Runtime Success:       {_exp_stats.runtime_pass}/{p} ({_exp_stats.runtime_success_rate:.1f}%)")
+        print(f"  Functional Success:    {_exp_stats.functional_pass}/{p} ({_exp_stats.functional_success_rate:.1f}%)")
+        if _exp_stats.has_repair_data:
+            print(f"  Programs Repaired:     {_exp_stats.programs_repaired}")
+            print(f"  Repair Gain:           +{_exp_stats.repair_success_gain}")
+            print(f"  Avg Repair Rounds:     {_exp_stats.avg_repair_rounds:.1f}")
+        print(f"  Avg Translation Time:  {_exp_stats.avg_translation_time:.1f}s")
+        if _exp_stats.avg_repair_time > 0:
+            print(f"  Avg Repair Time:       {_exp_stats.avg_repair_time:.1f}s")
+        if _exp_stats.total_prompt_tokens > 0:
+            from token_tracker import estimate_cost
+            cost = estimate_cost(_exp_stats.total_prompt_tokens,
+                                 _exp_stats.total_completion_tokens)
+            print(f"  Total Prompt Tokens:   {_exp_stats.total_prompt_tokens:,}")
+            print(f"  Total Completion Tokens:{_exp_stats.total_completion_tokens:,}")
+            print(f"  Avg Prompt Tokens:     {_exp_stats.avg_prompt_tokens_per_program:.0f}")
+            print(f"  Avg Completion Tokens: {_exp_stats.avg_completion_tokens_per_program:.0f}")
+            print(f"  Est. API Cost:         ${cost:.4f}")
 
     # Cache statistics
     from translation_cache import get_stats as _cache_stats
     _hits, _misses, _writes = _cache_stats()
     if _hits > 0 or _misses > 0:
-        print(f"  Cache Hits:     {_hits}")
-        print(f"  Cache Misses:   {_misses}")
-        print(f"  Cache Writes:   {_writes}")
+        total_cache = _hits + _misses
+        hit_rate = _hits / max(total_cache, 1) * 100
+        print(f"  Cache Hits:            {_hits}")
+        print(f"  Cache Misses:          {_misses}")
+        print(f"  Cache Hit Rate:        {hit_rate:.1f}%")
 
+    # Skip list summary
+    from skip_list import skip_count as _sc, load_skip_list as _lsl
+    _skip_total = _sc()
+    if _skip_total > 0:
+        _skip_map = _lsl()
+        skippable = sum(1 for v in _skip_map.values()
+                        if isinstance(v, dict) and v.get("count", 0) >= 2)
+        print(f"  Skip List Entries:     {_skip_total} ({skippable} skippable)")
+
+    print(f"")
     print(f"  Output:         {run_dir}/")
     print(f"    csv/          — experiment results")
     print(f"    reports/      — generated reports")

@@ -541,143 +541,148 @@ def fix_code(
     actual_outputs: str | None = None,
     repair_history: str | None = None,
     previous_repair_count: int = 0,
-) -> str:
-    """Repair translated Python code, providing full error context to the LLM.
+) -> "tuple[str, CallResult]":
+    """Repair translated Python code with a compact, efficient prompt.
 
-    The prompt is enriched with error categories, representative failed
-    test inputs, and repair history to help the model focus on the
-    right fix strategy.  When many test cases fail, only the most
-    representative failures are included to avoid excessive prompt size.
-
-    Args:
-        cpp_code: Original C++ source (ground truth).
-        python_code: Current (faulty) Python translation.
-        compile_error: Compilation error message, if any.
-        runtime_error: Runtime error message, if any.
-        functional_mismatch: Output difference description, if any.
-        error_category: Broad category hint — ``"syntax"``, ``"runtime"``,
-            or ``"semantic"``.  Helps the model focus its repair strategy.
-        failed_test_inputs: String representation of inputs that failed.
-        expected_outputs: Expected outputs for failed tests.
-        actual_outputs: Actual outputs produced for failed tests.
-        repair_history: Summary of previous repair attempts.
-        previous_repair_count: Number of repair attempts so far.
-
-    Returns:
-        LLM-generated repaired Python source code.
+    V5.2 improvements:
+        - Error messages truncated at 1000 chars
+        - C++ source limited to relevant segments when >300 lines
+        - Only 1 representative failed test case (not all failures)
+        - Only last 2 repair history entries kept
+        - Duplicated content removed
+        - Estimated prompt tokens printed before each request
     """
-    # Assemble error sections ------------------------------------------------
-    error_sections: list[str] = []
+    # ==== Truncate error messages (keep first 1000 chars) ====
+    _MAX_ERR = 1000
 
+    def _trunc(s: str) -> str:
+        if len(s) > _MAX_ERR:
+            return s[:_MAX_ERR] + "\n... (truncated)"
+        return s
+
+    # ==== Build concise error summary ====
+    error_parts: list[str] = []
     if compile_error:
-        error_sections.append(
-            f"**Compilation Error:**\n```\n{compile_error}\n```"
-        )
+        error_parts.append(f"Compilation Error:\n{_trunc(compile_error)}")
     if runtime_error:
-        error_sections.append(
-            f"**Runtime Error:**\n```\n{runtime_error}\n```"
-        )
+        error_parts.append(f"Runtime Error:\n{_trunc(runtime_error)}")
     if functional_mismatch:
-        error_sections.append(
-            f"**Functional Mismatch:**\n```\n{functional_mismatch}\n```"
-        )
+        error_parts.append(f"Output Mismatch:\n{_trunc(functional_mismatch)}")
 
-    # Extended context
+    error_summary = "\n\n".join(error_parts) if error_parts else (
+        "No specific error details available."
+    )
+
+    # ==== Only 1 representative failed test case ====
+    test_case_block = ""
     if failed_test_inputs:
-        error_sections.append(
-            f"**Failed Test Input(s):**\n```\n{failed_test_inputs}\n```"
-        )
-    if expected_outputs:
-        error_sections.append(
-            f"**Expected Output:**\n```\n{expected_outputs}\n```"
-        )
-    if actual_outputs:
-        error_sections.append(
-            f"**Actual Output:**\n```\n{actual_outputs}\n```"
-        )
+        lines = [l for l in failed_test_inputs.strip().split("\n") if l.strip()]
+        first = lines[0] if lines else ""
+        exp_line = ""
+        act_line = ""
+        if expected_outputs:
+            el = [l for l in expected_outputs.strip().split("\n") if l.strip()]
+            exp_line = el[0] if el else ""
+        if actual_outputs:
+            al = [l for l in actual_outputs.strip().split("\n") if l.strip()]
+            act_line = al[0] if al else ""
+        if first:
+            test_case_block = (
+                f"Representative Failed Test:\n"
+                f"  Input:    {first}\n"
+                f"  Expected: {exp_line}\n"
+                f"  Actual:   {act_line}"
+            )
 
-    error_block = "\n\n".join(error_sections) if error_sections else (
-        "(No specific error details available — please review the code "
-        "for semantic discrepancies.)"
-    )
-
-    # Build the prompt -------------------------------------------------------
-    prompt_parts: list[str] = [
-        "You are an expert software engineer specialised in C++ → Python "
-        "translation.",
-    ]
-
-    # Error category guidance
-    if error_category:
-        category_hints = {
-            "syntax": (
-                "The issue is a **syntax / compilation error**. "
-                "Focus on Python grammar, indentation, missing colons, "
-                "unmatched brackets, or malformed statements."
-            ),
-            "runtime": (
-                "The issue is a **runtime error**. "
-                "Focus on variable name typos, type mismatches, missing "
-                "imports, index/Key errors, or incorrect API usage."
-            ),
-            "semantic": (
-                "The issue is a **semantic / logic error**. "
-                "The program runs but produces incorrect output. "
-                "Compare your logic carefully against the C++ original."
-            ),
-            "timeout": (
-                "The issue is a **timeout**. "
-                "The program likely has an infinite loop or is too slow. "
-                "Check loop termination conditions."
-            ),
-        }
-        hint = category_hints.get(
-            error_category,
-            f"The issue category is **{error_category}**.",
-        )
-        prompt_parts.append(hint)
-
-    # Repair history
+    # ==== Last 2 repair history entries only ====
+    compact_history = ""
     if repair_history:
-        prompt_parts.append(
-            f"**Previous Repair Attempts:**\n{repair_history}"
+        hist_lines = [l for l in repair_history.strip().split("\n") if l.strip()]
+        if len(hist_lines) > 2:
+            hist_lines = hist_lines[-2:]
+        compact_history = "\n".join(hist_lines)
+
+    # ==== C++ source compact when >300 lines ====
+    cpp_display = cpp_code
+    _MAX_CPP = 300
+    cpp_lines = cpp_code.count("\n") + 1
+    if cpp_lines > _MAX_CPP:
+        # Keep first 50 lines (includes), last 30 lines, and
+        # any line that looks like a function signature
+        all_lines = cpp_code.split("\n")
+        kept_lines: list[str] = (
+            all_lines[:50] +
+            ["// ... (omitted middle section) ..."] +
+            [l for l in all_lines if (
+                l.strip().startswith(("int ", "void ", "bool ", "double ",
+                    "float ", "long ", "char ", "string ", "auto ",
+                    "vector", "class ", "struct ", "template"))
+                and ("(" in l and ")" in l)
+            )] +
+            all_lines[-30:]
         )
+        # Deduplicate
+        seen: set[str] = set()
+        final: list[str] = []
+        for l in kept_lines:
+            stripped = l.strip()
+            if stripped not in seen or stripped.startswith("//"):
+                seen.add(stripped)
+                final.append(l)
+        cpp_display = "\n".join(final)
+
+    # ==== Error category hint (compact) ====
+    category_hint = ""
+    if error_category:
+        _HINTS = {
+            "syntax": "This is a syntax/compilation error. Focus on Python grammar.",
+            "runtime": "This is a runtime error. Check variable names, types, imports.",
+            "semantic": "This is a logic error. The code runs but outputs wrong values.",
+            "timeout": "This is a timeout. Check for infinite loops.",
+        }
+        category_hint = _HINTS.get(error_category, f"Issue category: {error_category}.")
+
+    # ==== Build the compact prompt ====
+    parts: list[str] = [
+        "You are an expert C++→Python translator. Fix the Python code below.",
+    ]
+    if category_hint:
+        parts.append(category_hint)
+    if compact_history:
+        parts.append(f"Last repair attempts:\n{compact_history}")
     if previous_repair_count > 0:
-        prompt_parts.append(
-            f"This is repair attempt #{previous_repair_count + 1}. "
-            f"Previous attempts did not resolve all issues — please try "
-            f"a different approach this time."
+        parts.append(
+            f"Repair attempt #{previous_repair_count + 1}. "
+            "Previous attempts failed — use a different approach."
         )
 
-    prompt_parts.append(
-        f"""\
-============================================================================
-Original C++ Code (ground truth):
-============================================================================
-{cpp_code}
-
-============================================================================
-Current Python Code (to repair):
-============================================================================
-{python_code}
-
-============================================================================
-Identified Issues:
-============================================================================
-{error_block}
-
-============================================================================
-Requirements:
-============================================================================
-1. **Preserve semantic equivalence** — the repaired Python program MUST
-   produce IDENTICAL output to the original C++ program for the same input.
-2. Fix **all** identified issues.
-3. Return **only** the corrected Python code.
-4. Do **not** include explanations, markdown fences, or comments."""
+    parts.append(
+        f"Original C++:\n```cpp\n{cpp_display}\n```\n\n"
+        f"Current Python:\n```python\n{python_code}\n```\n\n"
+        f"Errors:\n{error_summary}"
+    )
+    if test_case_block:
+        parts.append(test_case_block)
+    parts.append(
+        "Return ONLY the corrected Python code. "
+        "No markdown, no explanations."
     )
 
-    result = call_gpt_structured("\n\n".join(prompt_parts))
+    prompt = "\n\n".join(parts)
+
+    # ==== Log estimated prompt size ====
+    est_tokens = len(prompt) // 4  # rough estimate: ~4 chars per token
+    prompt_kb = len(prompt) / 1024
+    print(f"     Repair prompt: {prompt_kb:.1f} KB (~{est_tokens} tokens)", flush=True)
+
+    result = call_gpt_structured(prompt)
     cleaned = clean_code(result.text)
+
+    # ==== Log repair result ====
+    print(f"     Repair done: {result.elapsed_seconds:.1f}s | "
+          f"P:{result.prompt_tokens} C:{result.completion_tokens} "
+          f"T:{result.total_tokens}", flush=True)
+
     return cleaned, result
 
 
@@ -1918,7 +1923,7 @@ def process_program(program_path: str) -> None:
                 f"{'Timeout' if is_timeout else 'APIError'}"
             )
             try:
-                _record_skip(program_name, skip_reason)
+                _record_skip(program_name, skip_reason, stage=stage)
             except Exception:
                 pass
 
@@ -1965,7 +1970,7 @@ def process_program(program_path: str) -> None:
 def _format_repair_history(entries: list[str]) -> str:
     """Format repair history entries for inclusion in a prompt.
 
-    Only the last 10 entries are included to keep prompts manageable.
+    Only the last 2 entries are included to keep repair prompts compact.
 
     Args:
         entries: Chronological list of repair attempt descriptions.
@@ -1975,7 +1980,7 @@ def _format_repair_history(entries: list[str]) -> str:
     """
     if not entries:
         return ""
-    return "\n".join(f"  - {e}" for e in entries[-10:])
+    return "\n".join(f"  - {e}" for e in entries[-2:])
 
 
 def _format_failed_inputs(report: DiffReport | None) -> str:

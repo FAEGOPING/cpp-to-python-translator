@@ -42,7 +42,7 @@ from token_tracker import record_llm_call
 # Per-request timeout with explicit connect/read/write/pool phases.
 # macOS TCP settings can delay detection of dead connections, so we
 # set every phase explicitly rather than relying on a single float.
-_API_TIMEOUT = httpx.Timeout(60.0, connect=15.0, read=60.0, write=30.0, pool=5.0)
+_API_TIMEOUT = httpx.Timeout(120.0, connect=20.0, read=120.0, write=60.0, pool=10.0)
 
 # ---------------------------------------------------------------------------
 # Data types
