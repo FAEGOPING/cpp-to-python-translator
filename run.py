@@ -457,6 +457,39 @@ def run_cpp(cpp_file: str, test_input: str) -> tuple[bool, str]:
         )
 
 
+def clean_code(text: str) -> str:
+    """Strip markdown fences, leading/trailing blank lines, and
+    normalise whitespace from an LLM-generated code response.
+
+    The LLM sometimes wraps code in `` ```python … ``` `` or
+    `` ```cpp … ``` ``` `` despite explicit instructions not to.
+    This function removes those artifacts so the code compiles
+    cleanly.
+
+    Args:
+        text: Raw LLM response text (may contain markdown fences).
+
+    Returns:
+        Clean Python source code.
+    """
+    import re
+
+    code = text.strip()
+    if not code:
+        return code
+
+    # Remove opening markdown fence: ```python, ```cpp, ```py, or bare ```
+    code = re.sub(r"^```(?:python|cpp|c\+\+|py|python3)?\s*", "", code, flags=re.IGNORECASE)
+
+    # Remove closing markdown fence
+    code = re.sub(r"\s*```\s*$", "", code)
+
+    # Normalise: strip leading/trailing blank lines again
+    code = code.strip()
+
+    return code
+
+
 # ============================================================================
 # Translation prompt (original — preserved)
 # ============================================================================
@@ -486,7 +519,8 @@ C++ Code:
 {cpp_code}"""
 
     result = call_gpt_structured(prompt)
-    return result.text, result
+    cleaned = clean_code(result.text)
+    return cleaned, result
 
 
 # ============================================================================
@@ -642,7 +676,8 @@ Requirements:
     )
 
     result = call_gpt_structured("\n\n".join(prompt_parts))
-    return result.text, result
+    cleaned = clean_code(result.text)
+    return cleaned, result
 
 
 # ============================================================================
