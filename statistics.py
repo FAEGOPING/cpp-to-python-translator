@@ -142,6 +142,9 @@ class ExperimentStats:
     repair_success_gain: int = 0
     """Programs that passed after repair but failed initially."""
 
+    repair_round_distribution: Dict[int, int] = field(default_factory=dict)
+    """Number of programs per repair-round count (0 rounds, 1 round, …)."""
+
     # ---- Test counts ----
     avg_generated_tests: float = 0.0
     avg_executed_tests: float = 0.0
@@ -345,13 +348,22 @@ def compute_stats(
         stats.avg_repair_rounds = sum(repair_rounds) / len(repair_rounds)
         stats.max_repair_rounds = max(repair_rounds)
 
-    # Repair success gain: programs that passed at repair round > 0
-    # (from detail rows, not summary)
-    for r in use_detail:
+    # Repair round distribution: count programs by rounds used (including 0)
+    rr_dist: dict[int, int] = defaultdict(int)
+    for r in bench_rows:
+        rounds = _safe_int(r.get("RepairRounds"))
+        rr_dist[rounds] = rr_dist.get(rounds, 0) + 1
+    stats.repair_round_distribution = dict(sorted(rr_dist.items()))
+
+    # Repair success gain: programs that were initially failing compile
+    # but passed functional after repair. We count each program only once
+    # (using final state from summary, not intermediate detail rows).
+    # The "gain" is: programs where FinalCompilePass=True but
+    # InitialCompilePass=False (i.e. repair fixed the compile error).
+    for r in bench_rows:
         if not r.get("Program", "").startswith("program_"):
             continue
-        round_num = _safe_int(r.get("Round"))
-        if round_num > 0 and _safe_bool(r.get("FunctionalPass")):
+        if (not _safe_bool(r.get("InitialCompilePass"))) and _safe_bool(r.get("FunctionalPass")):
             stats.repair_success_gain += 1
 
     # ---- Test counts ----
