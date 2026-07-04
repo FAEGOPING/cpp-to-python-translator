@@ -706,8 +706,18 @@ def _run_translation_experiment(
         else:
             # ---- parallel path (ThreadPoolExecutor) --------------------------
             enable_buffer_mode()
+            from concurrency import init_semaphore
+            from perf_monitor import reset_monitor, get_monitor as _get_perf
+            from token_tracker import reset_session_stats
+
+            # Initialise adaptive concurrency controller
+            init_semaphore(workers)
+            reset_session_stats()
+            reset_monitor()
+
             completed_lock = threading.Lock()
             completed = [0]  # mutable counter for closure
+            current_prog: list[str] = [""]  # currently-processing program name
 
             # Real-time progress dashboard
             dash_enabled = not getattr(args, 'no_dashboard', False)
@@ -718,9 +728,6 @@ def _run_translation_experiment(
                 dash.start()
             else:
                 dash = None
-
-            from token_tracker import reset_session_stats
-            reset_session_stats()
 
             with ThreadPoolExecutor(max_workers=workers) as executor:
                 futures = {}
@@ -737,15 +744,19 @@ def _run_translation_experiment(
 
                     with completed_lock:
                         completed[0] += 1
+                        current_prog[0] = name
 
                     if dash is not None:
-                        dash.update(completed[0])
+                        dash.update(completed[0], current_program=name)
 
             if dash is not None:
                 dash.stop()
 
             # Sort buffered rows by program name, then write CSVs
             flush_sorted_csvs()
+
+            # Print performance summary
+            _get_perf().print_summary(total, time.time() - _get_perf()._start_time, workers)
     except Exception as exc:
         logger.error(f"Translation pipeline error: {exc}")
         import traceback

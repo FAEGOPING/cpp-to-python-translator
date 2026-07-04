@@ -35,6 +35,7 @@ from dataclasses import dataclass, field
 
 from openai import OpenAI
 
+from concurrency import get_semaphore
 from token_tracker import record_llm_call
 
 # ---------------------------------------------------------------------------
@@ -220,11 +221,9 @@ def call_gpt(prompt: str) -> str:
 def call_gpt_structured(prompt: str) -> CallResult:
     """Send a prompt to DeepSeek-V4-Pro and return structured results.
 
-    Includes automatic retry with exponential backoff for transient
-    API failures (rate limits, server errors, connection issues).
-
-    Token usage is extracted from the API response and accumulated
-    into the global :class:`SessionStats`.
+    Uses adaptive concurrency control — acquires a semaphore permit
+    before each API call.  Sustained transient failures automatically
+    reduce the effective concurrency; clean requests restore it.
 
     Args:
         prompt: The full prompt text to send.
@@ -236,61 +235,70 @@ def call_gpt_structured(prompt: str) -> CallResult:
         RuntimeError: If ``DEEPSEEK_API_KEY`` is not set.
     """
     client = _get_client()
+    sem = get_semaphore()
     t0 = time.time()
     retries = 0
 
-    for attempt in range(_MAX_RETRIES):
-        try:
-            response = client.chat.completions.create(
-                model="deepseek-v4-pro",
-                messages=[
-                    {"role": "user", "content": prompt},
-                ],
-                temperature=0,
-            )
-            elapsed = time.time() - t0
+    # Acquire adaptive concurrency permit (blocks if too many
+    # concurrent requests are failing)
+    sem.acquire()
 
-            # Extract token usage from the API response
-            prompt_tokens = 0
-            completion_tokens = 0
-            total_tokens = 0
+    try:
+        for attempt in range(_MAX_RETRIES):
             try:
-                usage = response.usage
-                if usage:
-                    prompt_tokens = usage.prompt_tokens or 0
-                    completion_tokens = usage.completion_tokens or 0
-                    total_tokens = usage.total_tokens or 0
-            except Exception:
-                pass  # token counts are best-effort
+                response = client.chat.completions.create(
+                    model="deepseek-v4-pro",
+                    messages=[
+                        {"role": "user", "content": prompt},
+                    ],
+                    temperature=0,
+                )
+                elapsed = time.time() - t0
 
-            # Auto-track tokens for per-program and session statistics
-            record_llm_call(
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-                total_tokens=total_tokens,
-                retries=retries,
-            )
+                # Extract token usage from the API response
+                prompt_tokens = 0
+                completion_tokens = 0
+                total_tokens = 0
+                try:
+                    usage = response.usage
+                    if usage:
+                        prompt_tokens = usage.prompt_tokens or 0
+                        completion_tokens = usage.completion_tokens or 0
+                        total_tokens = usage.total_tokens or 0
+                except Exception:
+                    pass  # token counts are best-effort
 
-            result = CallResult(
-                text=(response.choices[0].message.content or "").strip(),
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-                total_tokens=total_tokens,
-                elapsed_seconds=elapsed,
-                retry_count=retries,
-            )
+                # Auto-track tokens for per-program and session statistics
+                record_llm_call(
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    total_tokens=total_tokens,
+                    retries=retries,
+                )
 
-            _session_stats.record(result)
-            return result
+                result = CallResult(
+                    text=(response.choices[0].message.content or "").strip(),
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    total_tokens=total_tokens,
+                    elapsed_seconds=elapsed,
+                    retry_count=retries,
+                )
 
-        except Exception as exc:
-            if attempt < _MAX_RETRIES - 1 and _is_retryable(exc):
-                retries += 1
-                delay = _BASE_DELAY * (2 ** attempt)
-                time.sleep(delay)
-            else:
-                # Last attempt or non-retryable error — re-raise
-                raise
+                _session_stats.record(result)
+                # Signal success to adaptive controller
+                sem.report_success()
+                return result
 
-    # Should not be reached, but satisfy type checker
-    raise RuntimeError("Unexpected: exhausted retries without exception")
+            except Exception as exc:
+                if attempt < _MAX_RETRIES - 1 and _is_retryable(exc):
+                    retries += 1
+                    sem.report_failure(is_retryable=True)
+                    delay = _BASE_DELAY * (2 ** attempt)
+                    time.sleep(delay)
+                else:
+                    # Last attempt or non-retryable error — re-raise
+                    sem.report_failure(is_retryable=False)
+                    raise
+    finally:
+        sem.release()

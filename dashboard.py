@@ -81,6 +81,7 @@ class Dashboard:
         self._start_time: float = 0.0
         self._elapsed: float = 0.0
         self._program_times: list[float] = []  # rolling window
+        self._current_program: str = ""
         self._running: bool = False
 
         # Pre-compute field widths
@@ -103,6 +104,7 @@ class Dashboard:
         self,
         completed: int,
         program_time: float = 0.0,
+        current_program: str = "",
     ) -> None:
         """Record a completed program and refresh the display.
 
@@ -110,15 +112,17 @@ class Dashboard:
             completed: Cumulative number of completed programs.
             program_time: Wall-clock time for the most recently
                 completed program (seconds).
+            current_program: Filename of the most recently completed
+                program (for live display).
         """
         if not self.enabled:
             return
         with self._lock:
             self._completed = completed
             self._elapsed = time.time() - self._start_time
+            self._current_program = current_program
             if program_time > 0:
                 self._program_times.append(program_time)
-                # Keep last 20 for rolling average
                 if len(self._program_times) > 20:
                     self._program_times = self._program_times[-20:]
         self._render()
@@ -153,6 +157,7 @@ class Dashboard:
             compl = self._completed
             elapsed = self._elapsed
             ptimes = list(self._program_times)
+            cur_prog = self._current_program
 
         # Compute derived metrics
         pct = compl * 100 // max(self.total, 1)
@@ -197,6 +202,8 @@ class Dashboard:
             lines.append(f"  ETA:           {_fmt_duration(eta_sec)}")
 
         lines.append(f"  Throughput:    {throughput:.1f} programs/min")
+        if cur_prog:
+            lines.append(f"  Last completed:{cur_prog}")
         if avg_time > 0:
             lines.append(f"  Avg time:      {avg_time:.1f}s / program")
 

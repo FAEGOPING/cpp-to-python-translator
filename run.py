@@ -121,6 +121,10 @@ def flush_sorted_csvs() -> None:
     _buffer_summary_header = None
 
 
+import re as _re
+
+_SORT_SPLIT = _re.compile(r"(\d+)")
+
 def _sort_key(program_name: str) -> tuple:
     """Natural sort key for program filenames.
 
@@ -133,9 +137,8 @@ def _sort_key(program_name: str) -> tuple:
     Returns:
         A tuple suitable for use as a sort key.
     """
-    import re
     base = program_name.replace(".cpp", "").replace(".py", "")
-    parts = re.split(r"(\d+)", base)
+    parts = _SORT_SPLIT.split(base)
     key: list = []
     for p in parts:
         if p.isdigit():
@@ -145,6 +148,7 @@ def _sort_key(program_name: str) -> tuple:
     return tuple(key)
 
 from gpt_api import call_gpt, call_gpt_structured, CallResult
+from perf_monitor import get_monitor
 from token_tracker import (
     reset_program_tokens, get_program_tokens, get_last_call_tokens,
 )
@@ -1152,6 +1156,7 @@ def process_program(program_path: str) -> None:
     cfg = _cfg()
     program_name = os.path.basename(program_path)
     reset_program_tokens()
+    mon = get_monitor()
 
     print(f"\n{'=' * 60}")
     print(f"Processing: {program_name}")
@@ -1218,6 +1223,7 @@ def process_program(program_path: str) -> None:
         t0_c = time.time()
         compile_ok, compile_error = check_compile(python_code)
         compile_time = time.time() - t0_c
+        mon.record_compile(compile_time)
 
         if round_num == 0:
             initial_compile_pass = compile_ok
@@ -1276,6 +1282,7 @@ def process_program(program_path: str) -> None:
         first_input = all_test_cases[0][0] if all_test_cases else ""
         runtime_ok, runtime_output = run_python(python_code, first_input)
         runtime_time = time.time() - t0_r
+        mon.record_runtime(runtime_time)
 
         if not runtime_ok:
             err_type = _classify_error(runtime_output)
@@ -1336,6 +1343,7 @@ def process_program(program_path: str) -> None:
             )
             func_ok = report.all_passed
             validation_time = time.time() - t0_v
+            mon.record_functional(validation_time)
 
             if not func_ok:
                 mismatch = report.mismatch_report(max_cases=5)
