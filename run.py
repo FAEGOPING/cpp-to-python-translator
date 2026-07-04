@@ -1220,6 +1220,8 @@ def process_program(program_path: str) -> None:
         t0 = time.time()
         python_code, _trans_result = translate_cpp(cpp_code)
         translation_time = time.time() - t0
+        mon.record_translation(translation_time)
+        mon.record_api_wait(_trans_result.elapsed_seconds)
         _cache_save(program_name, python_code)
 
     initial_compile_pass: bool = False
@@ -1455,6 +1457,8 @@ def process_program(program_path: str) -> None:
                 repair_history=history,
                 previous_repair_count=round_num,
             )
+            mon.record_repair(_repair_result.elapsed_seconds)
+            mon.record_api_wait(_repair_result.elapsed_seconds)
 
             repair_history_entries.append(
                 f"Round {round_num}: Compile error ({err_type}) — {err_cat}"
@@ -1510,6 +1514,8 @@ def process_program(program_path: str) -> None:
                 repair_history=history,
                 previous_repair_count=round_num,
             )
+            mon.record_repair(_repair_result.elapsed_seconds)
+            mon.record_api_wait(_repair_result.elapsed_seconds)
             repair_history_entries.append(
                 f"Round {round_num}: Runtime error ({err_type}) — {err_cat}"
             )
@@ -1667,6 +1673,8 @@ def process_program(program_path: str) -> None:
                 repair_history=history,
                 previous_repair_count=round_num,
             )
+            mon.record_repair(_repair_result.elapsed_seconds)
+            mon.record_api_wait(_repair_result.elapsed_seconds)
             repair_history_entries.append(
                 f"Round {round_num}: Functional mismatch — {err_cat} "
                 f"({passed_count}/{total_test_count} passed)"

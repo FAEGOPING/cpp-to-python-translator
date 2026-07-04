@@ -124,12 +124,12 @@ class PerfMonitor:
             t_api = self._api_wait_time
             t_repair = self._repair_time
 
-            n_trans = max(self._translation_count, 1)
-            n_comp = max(self._compile_count, 1)
-            n_run = max(self._runtime_count, 1)
-            n_func = max(self._functional_count, 1)
-            n_api = max(self._api_call_count, 1)
-            n_repair = max(self._repair_count, 1)
+            n_trans = self._translation_count
+            n_comp = self._compile_count
+            n_run = self._runtime_count
+            n_func = self._functional_count
+            n_api = self._api_call_count
+            n_repair = self._repair_count
 
         # Compute remaining (unaccounted) time
         accounted = t_trans + t_comp + t_run + t_func + t_api + t_repair
