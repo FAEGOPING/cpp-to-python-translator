@@ -652,6 +652,11 @@ Requirements:
 def check_compile(code: str) -> tuple[bool, str | None]:
     """Check whether Python *code* passes ``py_compile``.
 
+    The check is bounded by ``execution_timeout`` seconds to prevent a
+    hung subprocess from blocking the worker thread indefinitely.  On
+    timeout the compilation is treated as a failure and the worker
+    continues to the next stage.
+
     Args:
         code: Python source code string.
 
@@ -659,6 +664,8 @@ def check_compile(code: str) -> tuple[bool, str | None]:
         ``(passed, error_or_none)`` — *error_or_none* is the compiler
         stderr on failure, ``None`` on success.
     """
+    timeout = _cfg().execution_timeout
+
     fd, file_path = tempfile.mkstemp(suffix=".py")
     os.close(fd)
     try:
@@ -673,12 +680,18 @@ def check_compile(code: str) -> tuple[bool, str | None]:
             ["python3", "-m", "py_compile", file_path],
             capture_output=True,
             text=True,
+            timeout=timeout,
         )
 
         if result.returncode != 0:
             return False, result.stderr.strip()
 
         return True, None
+
+    except subprocess.TimeoutExpired:
+        return False, (
+            f"[Timeout] py_compile exceeded {timeout}s"
+        )
     finally:
         _try_remove(file_path)
 
