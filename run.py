@@ -1216,6 +1216,179 @@ def process_program(program_path: str) -> None:
     last_error_category: str = "unknown"
     compile_ok: bool = False  # safe default when max_repair_rounds == 0
 
+    # ---- no-repair (single-pass) path ------------------------------------
+    # When repair is disabled, validate exactly once and return.
+    # Never enter the repair loop, never print "Maximum repair rounds".
+    if cfg.max_repair_rounds == 0:
+        elapsed = time.time() - start_time
+
+        # Compile check
+        t0_c = time.time()
+        compile_ok, compile_error = check_compile(python_code)
+        compile_time = time.time() - t0_c
+        mon.record_compile(compile_time)
+
+        if not compile_ok:
+            err_type = _classify_error(compile_error)
+            log_result(
+                program_name, 0,
+                compile_pass=False, runtime_pass=False, functional_pass=False,
+                error_type=err_type, elapsed_time=elapsed, repair_count=0,
+                translation_time=translation_time, compile_time=compile_time,
+                generated_test_count=len(generated_cases),
+                executed_test_count=total_test_count, passed_test_count=0,
+                success_rate=0.0,
+                failure_reason=compile_error[:200] if compile_error else "",
+                final_error_type=err_type, total_repair_attempts=0,
+            )
+            log_summary(
+                program_name,
+                initial_compile_pass=False, final_compile_pass=False,
+                runtime_pass=False, functional_pass=False,
+                repair_rounds=0, total_time=elapsed,
+                translation_time=translation_time,
+                generated_test_count=len(generated_cases),
+                executed_test_count=total_test_count, passed_test_count=0,
+                success_rate=0.0, final_error_type=err_type,
+                error_category=_classify_error_category(err_type),
+                total_repair_attempts=0,
+            )
+            save_code(program_name, python_code)
+            return
+
+        initial_compile_pass = True
+
+        # Runtime check
+        t0_r = time.time()
+        first_input = all_test_cases[0][0] if all_test_cases else ""
+        runtime_ok, runtime_output = run_python(python_code, first_input)
+        runtime_time = time.time() - t0_r
+        mon.record_runtime(runtime_time)
+
+        if not runtime_ok:
+            err_type = _classify_error(runtime_output)
+            log_result(
+                program_name, 0,
+                compile_pass=True, runtime_pass=False, functional_pass=False,
+                error_type=err_type, elapsed_time=elapsed, repair_count=0,
+                translation_time=translation_time, compile_time=compile_time,
+                runtime_time=runtime_time,
+                generated_test_count=len(generated_cases),
+                executed_test_count=total_test_count, passed_test_count=0,
+                success_rate=0.0,
+                failure_reason=runtime_output[:200],
+                final_error_type=err_type, total_repair_attempts=0,
+            )
+            log_summary(
+                program_name,
+                initial_compile_pass=True, final_compile_pass=True,
+                runtime_pass=False, functional_pass=False,
+                repair_rounds=0, total_time=elapsed,
+                translation_time=translation_time,
+                generated_test_count=len(generated_cases),
+                executed_test_count=total_test_count, passed_test_count=0,
+                success_rate=0.0, final_error_type=err_type,
+                error_category=_classify_error_category(err_type),
+                total_repair_attempts=0,
+            )
+            save_code(program_name, python_code)
+            return
+
+        # Functional validation
+        t0_v = time.time()
+        mismatch = ""  # safe default for both validation paths
+        if cfg.validation_strategy == "differential" and total_test_count > 0:
+            report = validate_translation_multi(
+                program_path, python_code, all_test_cases, cache=cache,
+            )
+            func_ok = report.all_passed
+            validation_time = time.time() - t0_v
+            passed_count = report.passed
+            sr = passed_count / max(total_test_count, 1)
+            if not func_ok:
+                mismatch = report.mismatch_report(max_cases=5)
+        else:
+            single_input = all_test_cases[0][0] if all_test_cases else ""
+            func_ok, _, _, mismatch = validate_translation(
+                program_path, python_code, single_input,
+            )
+            validation_time = time.time() - t0_v
+            passed_count = 1 if func_ok else 0
+            sr = passed_count / max(total_test_count, 1)
+            report = None
+            if not func_ok and mismatch.startswith("C++_EXECUTION_FAILED:"):
+                # Cannot validate — C++ baseline failed
+                log_result(
+                    program_name, 0,
+                    compile_pass=True, runtime_pass=True, functional_pass=False,
+                    error_type="CppExecutionFailed", elapsed_time=elapsed,
+                    repair_count=0,
+                    translation_time=translation_time,
+                    compile_time=compile_time, runtime_time=runtime_time,
+                    validation_time=validation_time,
+                    generated_test_count=len(generated_cases),
+                    executed_test_count=total_test_count, passed_test_count=0,
+                    success_rate=0.0, failure_reason=mismatch[:200],
+                    final_error_type="CppExecutionFailed",
+                    total_repair_attempts=0,
+                )
+                log_summary(
+                    program_name,
+                    initial_compile_pass=True, final_compile_pass=True,
+                    runtime_pass=True, functional_pass=False,
+                    repair_rounds=0, total_time=elapsed,
+                    translation_time=translation_time,
+                    validation_time=validation_time,
+                    generated_test_count=len(generated_cases),
+                    executed_test_count=total_test_count,
+                    passed_test_count=0, success_rate=0.0,
+                    final_error_type="CppExecutionFailed",
+                    error_category="unknown", total_repair_attempts=0,
+                )
+                save_code(program_name, python_code)
+                return
+        mon.record_functional(validation_time)
+
+        print(f"\n  ✅ Round 0: ALL CHECKS PASSED" if func_ok else
+              f"\n  ❌ Round 0: Functional MISMATCH")
+        if func_ok:
+            print(f"     Compile ✓ | Runtime ✓ | Functional ✓ "
+                  f"({passed_count}/{total_test_count} tests)")
+        save_code(program_name, python_code)
+
+        log_result(
+            program_name, 0,
+            compile_pass=True, runtime_pass=True,
+            functional_pass=func_ok,
+            error_type="None" if func_ok else "FunctionalMismatch",
+            elapsed_time=elapsed, repair_count=0,
+            translation_time=translation_time, compile_time=compile_time,
+            runtime_time=runtime_time, validation_time=validation_time,
+            generated_test_count=len(generated_cases),
+            executed_test_count=total_test_count,
+            passed_test_count=passed_count, success_rate=sr,
+            failure_reason="" if func_ok else mismatch[:200],
+            final_error_type="None" if func_ok else "FunctionalMismatch",
+            total_repair_attempts=0,
+        )
+
+        log_summary(
+            program_name,
+            initial_compile_pass=True, final_compile_pass=True,
+            runtime_pass=True, functional_pass=func_ok,
+            repair_rounds=0, total_time=elapsed,
+            translation_time=translation_time,
+            validation_time=validation_time,
+            generated_test_count=len(generated_cases),
+            executed_test_count=total_test_count,
+            passed_test_count=passed_count, success_rate=sr,
+            final_error_type="None" if func_ok else "FunctionalMismatch",
+            error_category="none" if func_ok else "semantic",
+            total_repair_attempts=0,
+        )
+        return
+    # ---- end no-repair path -----------------------------------------------
+
     # -- repair loop ---------------------------------------------------------
     for round_num in range(cfg.max_repair_rounds):
         elapsed = time.time() - start_time
