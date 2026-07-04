@@ -33,10 +33,16 @@ import threading
 import time
 from dataclasses import dataclass, field
 
+import httpx
 from openai import OpenAI
 
 from concurrency import get_semaphore
 from token_tracker import record_llm_call
+
+# Per-request timeout with explicit connect/read/write/pool phases.
+# macOS TCP settings can delay detection of dead connections, so we
+# set every phase explicitly rather than relying on a single float.
+_API_TIMEOUT = httpx.Timeout(60.0, connect=15.0, read=60.0, write=30.0, pool=5.0)
 
 # ---------------------------------------------------------------------------
 # Data types
@@ -122,7 +128,6 @@ _client_lock = threading.Lock()
 # Retry settings
 _MAX_RETRIES: int = 3
 _BASE_DELAY: float = 1.0       # seconds — doubles each retry (1, 2, 4)
-_REQUEST_TIMEOUT: float = 120.0  # seconds
 
 # Transient error patterns to retry
 _RETRYABLE_ERRORS: tuple[str, ...] = (
@@ -189,7 +194,7 @@ def _get_client() -> OpenAI:
                 _client = OpenAI(
                     api_key=api_key,
                     base_url="https://api.deepseek.com",
-                    timeout=_REQUEST_TIMEOUT,
+                    timeout=_API_TIMEOUT,
                     max_retries=0,  # we handle retries ourselves
                 )
     return _client
@@ -225,6 +230,11 @@ def call_gpt_structured(prompt: str) -> CallResult:
     before each API call.  Sustained transient failures automatically
     reduce the effective concurrency; clean requests restore it.
 
+    Each request has a hard timeout (60s connect+read+write).  On macOS
+    an explicit :class:`httpx.Timeout` is used because a bare float
+    may not fire correctly when a TCP connection dies mid-stream
+    (the OS TCP retransmission timer can outlive the app-level timeout).
+
     Args:
         prompt: The full prompt text to send.
 
@@ -233,25 +243,32 @@ def call_gpt_structured(prompt: str) -> CallResult:
 
     Raises:
         RuntimeError: If ``DEEPSEEK_API_KEY`` is not set.
+        openai.APIError: On persistent upstream API failures (after
+            3 retries with exponential backoff).
     """
     client = _get_client()
     sem = get_semaphore()
     t0 = time.time()
     retries = 0
 
-    # Acquire adaptive concurrency permit (blocks if too many
-    # concurrent requests are failing)
+    # Acquire adaptive concurrency permit.  The semaphore is released
+    # in the ``finally`` block — every exit path is covered.
     sem.acquire()
 
     try:
         for attempt in range(_MAX_RETRIES):
             try:
+                # Per-request timeout overrides client default.  Combined
+                # with httpx.Timeout this gives defence-in-depth: the
+                # client-level timeout catches slow connects/pool waits,
+                # the per-request timeout catches slow reads.
                 response = client.chat.completions.create(
                     model="deepseek-v4-pro",
                     messages=[
                         {"role": "user", "content": prompt},
                     ],
                     temperature=0,
+                    timeout=_API_TIMEOUT,
                 )
                 elapsed = time.time() - t0
 
@@ -291,14 +308,19 @@ def call_gpt_structured(prompt: str) -> CallResult:
                 return result
 
             except Exception as exc:
-                if attempt < _MAX_RETRIES - 1 and _is_retryable(exc):
+                retryable = _is_retryable(exc)
+                if attempt < _MAX_RETRIES - 1 and retryable:
                     retries += 1
                     sem.report_failure(is_retryable=True)
                     delay = _BASE_DELAY * (2 ** attempt)
                     time.sleep(delay)
                 else:
-                    # Last attempt or non-retryable error — re-raise
-                    sem.report_failure(is_retryable=False)
+                    # Last attempt or non-retryable error — re-raise.
+                    # ``finally`` below guarantees sem.release().
+                    sem.report_failure(is_retryable=retryable)
                     raise
     finally:
+        # ALWAYS release the semaphore — covers success, retryable
+        # failure re-raise, non-retryable failure re-raise, and
+        # unexpected exceptions (KeyboardInterrupt etc.).
         sem.release()
