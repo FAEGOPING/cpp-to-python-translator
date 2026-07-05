@@ -223,7 +223,7 @@ def call_gpt(prompt: str) -> str:
     return call_gpt_structured(prompt).text
 
 
-def call_gpt_structured(prompt: str) -> CallResult:
+def call_gpt_structured(prompt: str, max_tokens: int = 0) -> CallResult:
     """Send a prompt to DeepSeek-V4-Pro and return structured results.
 
     Uses adaptive concurrency control — acquires a semaphore permit
@@ -237,6 +237,7 @@ def call_gpt_structured(prompt: str) -> CallResult:
 
     Args:
         prompt: The full prompt text to send.
+        max_tokens: Maximum completion tokens (0 = no explicit limit).
 
     Returns:
         :class:`CallResult` with text, token counts, and timing.
@@ -262,14 +263,15 @@ def call_gpt_structured(prompt: str) -> CallResult:
                 # with httpx.Timeout this gives defence-in-depth: the
                 # client-level timeout catches slow connects/pool waits,
                 # the per-request timeout catches slow reads.
-                response = client.chat.completions.create(
-                    model="deepseek-v4-pro",
-                    messages=[
-                        {"role": "user", "content": prompt},
-                    ],
-                    temperature=0,
-                    timeout=_API_TIMEOUT,
-                )
+                create_kwargs: dict = {
+                    "model": "deepseek-v4-pro",
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0,
+                    "timeout": _API_TIMEOUT,
+                }
+                if max_tokens > 0:
+                    create_kwargs["max_tokens"] = max_tokens
+                response = client.chat.completions.create(**create_kwargs)
                 elapsed = time.time() - t0
 
                 # Extract token usage from the API response

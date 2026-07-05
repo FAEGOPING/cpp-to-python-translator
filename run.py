@@ -542,25 +542,24 @@ def fix_code(
     repair_history: str | None = None,
     previous_repair_count: int = 0,
 ) -> "tuple[str, CallResult]":
-    """Repair translated Python code with a compact, efficient prompt.
+    """Repair translated Python code with a strictly bounded LLM response.
 
-    V5.2 improvements:
-        - Error messages truncated at 1000 chars
-        - C++ source limited to relevant segments when >300 lines
-        - Only 1 representative failed test case (not all failures)
-        - Only last 2 repair history entries kept
-        - Duplicated content removed
-        - Estimated prompt tokens printed before each request
+    V5.3 — max_tokens=4000 prevents 20k+ token completions.
+    The prompt explicitly demands ONLY Python code output, stated at
+    both the beginning and end of the prompt.  Completion sanity
+    check warns when the response is abnormally large.
     """
-    # ==== Truncate error messages (keep first 1000 chars) ====
-    _MAX_ERR = 1000
+    _MAX_ERR  = 1000   # chars — truncate long error messages
+    _MAX_CPP  = 300    # lines — compact C++ source above this
+    _MAX_TOK  = 4000   # max completion tokens (prevents 20k+ responses)
 
+    # ---- helpers ----
     def _trunc(s: str) -> str:
         if len(s) > _MAX_ERR:
             return s[:_MAX_ERR] + "\n... (truncated)"
         return s
 
-    # ==== Build concise error summary ====
+    # ---- error summary ----
     error_parts: list[str] = []
     if compile_error:
         error_parts.append(f"Compilation Error:\n{_trunc(compile_error)}")
@@ -568,16 +567,13 @@ def fix_code(
         error_parts.append(f"Runtime Error:\n{_trunc(runtime_error)}")
     if functional_mismatch:
         error_parts.append(f"Output Mismatch:\n{_trunc(functional_mismatch)}")
+    error_summary = "\n\n".join(error_parts) if error_parts else "No error details."
 
-    error_summary = "\n\n".join(error_parts) if error_parts else (
-        "No specific error details available."
-    )
-
-    # ==== Only 1 representative failed test case ====
+    # ---- 1 representative failed test case only ----
     test_case_block = ""
     if failed_test_inputs:
-        lines = [l for l in failed_test_inputs.strip().split("\n") if l.strip()]
-        first = lines[0] if lines else ""
+        fl = [l for l in failed_test_inputs.strip().split("\n") if l.strip()]
+        first_input = fl[0] if fl else ""
         exp_line = ""
         act_line = ""
         if expected_outputs:
@@ -586,109 +582,111 @@ def fix_code(
         if actual_outputs:
             al = [l for l in actual_outputs.strip().split("\n") if l.strip()]
             act_line = al[0] if al else ""
-        if first:
+        if first_input:
             test_case_block = (
-                f"Representative Failed Test:\n"
-                f"  Input:    {first}\n"
+                f"Failed Test:\n"
+                f"  Input:    {first_input}\n"
                 f"  Expected: {exp_line}\n"
-                f"  Actual:   {act_line}"
+                f"  Got:      {act_line}"
             )
 
-    # ==== Last 2 repair history entries only ====
+    # ---- last 2 repair entries only ----
     compact_history = ""
     if repair_history:
-        hist_lines = [l for l in repair_history.strip().split("\n") if l.strip()]
-        if len(hist_lines) > 2:
-            hist_lines = hist_lines[-2:]
-        compact_history = "\n".join(hist_lines)
+        hl = [l for l in repair_history.strip().split("\n") if l.strip()]
+        compact_history = "\n".join(hl[-2:]) if len(hl) > 2 else "\n".join(hl)
 
-    # ==== C++ source compact when >300 lines ====
+    # ---- compact C++ (keep first 50 + signatures + last 30 when >300 lines) ----
     cpp_display = cpp_code
-    _MAX_CPP = 300
     cpp_lines = cpp_code.count("\n") + 1
     if cpp_lines > _MAX_CPP:
-        # Keep first 50 lines (includes), last 30 lines, and
-        # any line that looks like a function signature
         all_lines = cpp_code.split("\n")
-        kept_lines: list[str] = (
+        kept = (
             all_lines[:50] +
             ["// ... (omitted middle section) ..."] +
             [l for l in all_lines if (
-                l.strip().startswith(("int ", "void ", "bool ", "double ",
-                    "float ", "long ", "char ", "string ", "auto ",
-                    "vector", "class ", "struct ", "template"))
-                and ("(" in l and ")" in l)
+                any(l.strip().startswith(p) for p in (
+                    "int ", "void ", "bool ", "double ", "float ",
+                    "long ", "char ", "string ", "auto ", "vector",
+                    "class ", "struct ", "template"))
+                and "(" in l and ")" in l
             )] +
             all_lines[-30:]
         )
-        # Deduplicate
         seen: set[str] = set()
-        final: list[str] = []
-        for l in kept_lines:
-            stripped = l.strip()
-            if stripped not in seen or stripped.startswith("//"):
-                seen.add(stripped)
-                final.append(l)
-        cpp_display = "\n".join(final)
+        deduped: list[str] = []
+        for l in kept:
+            s = l.strip()
+            if s not in seen or s.startswith("//"):
+                seen.add(s)
+                deduped.append(l)
+        cpp_display = "\n".join(deduped)
 
-    # ==== Error category hint (compact) ====
+    # ---- category hint ----
     category_hint = ""
+    _HINTS = {
+        "syntax":   "Syntax/compilation error — check Python grammar.",
+        "runtime":  "Runtime error — check variables, types, imports.",
+        "semantic": "Logic error — code runs but produces wrong output.",
+        "timeout":  "Timeout — check for infinite loops.",
+    }
     if error_category:
-        _HINTS = {
-            "syntax": "This is a syntax/compilation error. Focus on Python grammar.",
-            "runtime": "This is a runtime error. Check variable names, types, imports.",
-            "semantic": "This is a logic error. The code runs but outputs wrong values.",
-            "timeout": "This is a timeout. Check for infinite loops.",
-        }
-        category_hint = _HINTS.get(error_category, f"Issue category: {error_category}.")
+        category_hint = _HINTS.get(error_category, "")
 
-    # ==== Build the compact prompt ====
-    parts: list[str] = [
-        "You are an expert C++→Python translator. Fix the Python code below.",
-    ]
+    # ==== BUILD PROMPT — output constraint at BOTH start and end ====
+    OUTPUT_RULE = (
+        "IMPORTANT: Return ONLY the repaired Python source code. "
+        "No explanations. No markdown. No code fences. "
+        "No change descriptions. No commentary of any kind. "
+        "Only the final Python program."
+    )
+
+    parts: list[str] = [OUTPUT_RULE]
     if category_hint:
         parts.append(category_hint)
     if compact_history:
-        parts.append(f"Last repair attempts:\n{compact_history}")
+        parts.append(f"Last repairs:\n{compact_history}")
     if previous_repair_count > 0:
         parts.append(
-            f"Repair attempt #{previous_repair_count + 1}. "
-            "Previous attempts failed — use a different approach."
+            f"Repair attempt #{previous_repair_count + 1} — "
+            "previous attempts failed, use a different approach."
         )
 
     parts.append(
         f"Original C++:\n```cpp\n{cpp_display}\n```\n\n"
-        f"Current Python:\n```python\n{python_code}\n```\n\n"
+        f"Current Python (to fix):\n```python\n{python_code}\n```\n\n"
         f"Errors:\n{error_summary}"
     )
     if test_case_block:
         parts.append(test_case_block)
-    parts.append(
-        "Return ONLY the corrected Python code. "
-        "No markdown, no explanations."
-    )
+    parts.append(OUTPUT_RULE)
 
     prompt = "\n\n".join(parts)
 
-    # ==== Log estimated prompt size ====
-    est_tokens = len(prompt) // 4  # rough estimate: ~4 chars per token
+    # ---- log prompt size ----
     prompt_kb = len(prompt) / 1024
-    print(f"     Repair prompt: {prompt_kb:.1f} KB (~{est_tokens} tokens)", flush=True)
+    est_tok = len(prompt) // 4
+    print(f"     Repair prompt: {prompt_kb:.1f} KB (~{est_tok} tokens)", flush=True)
 
-    result = call_gpt_structured(prompt)
+    # ==== CALL API with max_tokens limit ====
+    result = call_gpt_structured(prompt, max_tokens=_MAX_TOK)
     cleaned = clean_code(result.text)
 
-    # ==== Log repair result ====
+    # ---- completion sanity check ----
+    if result.completion_tokens > 5000:
+        print(f"     WARNING: Abnormally large LLM response. "
+              f"Completion: {result.completion_tokens} tokens", flush=True)
+
+    # ---- repair efficiency ----
+    ratio = (result.completion_tokens / max(result.prompt_tokens, 1))
     print(f"     Repair done: {result.elapsed_seconds:.1f}s | "
           f"P:{result.prompt_tokens} C:{result.completion_tokens} "
-          f"T:{result.total_tokens}", flush=True)
+          f"T:{result.total_tokens} | C/P ratio: {ratio:.2f}", flush=True)
+    if ratio > 3:
+        print(f"     WARNING: Repair response unusually long "
+              f"(C/P ratio {ratio:.2f})", flush=True)
 
     return cleaned, result
-
-
-# ============================================================================
-# Compilation check (original — preserved)
-# ============================================================================
 
 def check_compile(code: str) -> tuple[bool, str | None]:
     """Check whether Python *code* passes ``py_compile``.
@@ -1300,6 +1298,9 @@ def process_program(program_path: str) -> None:
         last_error_type: str = "None"
         last_error_category: str = "unknown"
         compile_ok: bool = False  # safe default when max_repair_rounds == 0
+        prev_mismatch_sig: str = ""
+        prev_compile_err: str = ""
+        prev_python_code: str = ""
 
         # ---- no-repair (single-pass) path ------------------------------------
         # When repair is disabled, validate exactly once and return.
@@ -1507,6 +1508,14 @@ def process_program(program_path: str) -> None:
                 initial_compile_pass = compile_ok
 
             if not compile_ok:
+                # ---- convergence: same compile error twice → stop ----
+                if (compile_error and prev_compile_err
+                        and compile_error[:200] == prev_compile_err[:200]):
+                    print(f"     Repair converged — same compile error twice. "
+                          f"Stopping early.", flush=True)
+                    break
+                prev_compile_err = compile_error or ""
+
                 err_type = _classify_error(compile_error)
                 err_cat = _classify_error_category(err_type)
                 last_error_type = err_type
@@ -1713,6 +1722,18 @@ def process_program(program_path: str) -> None:
 
                 # Genuine output mismatch — repair
                 _dbg(f"repair r{round_num} functional mismatch - entering repair", program_name, start_time)
+
+                # ---- convergence: same mismatch / identical code → stop ----
+                current_sig = mismatch[:300] if mismatch else (compact[:300] if compact else "")
+                if current_sig and current_sig == prev_mismatch_sig:
+                    print("     Repair converged — same mismatch twice. Stopping early.", flush=True)
+                    break
+                prev_mismatch_sig = current_sig
+                if python_code == prev_python_code and prev_python_code:
+                    print("     Repair converged — identical output. Stopping early.", flush=True)
+                    break
+                prev_python_code = python_code
+
                 err_type = "FunctionalMismatch"
                 err_cat = "semantic"
                 last_error_type = err_type

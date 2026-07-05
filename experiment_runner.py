@@ -643,7 +643,7 @@ def _run_translation_experiment(
     if args.max_repair_rounds is not None:
         cfg.max_repair_rounds = args.max_repair_rounds
     elif args.repair:
-        cfg.max_repair_rounds = 5  # default
+        cfg.max_repair_rounds = 3  # default (v5.3: reduced from 5)
     elif args.no_repair:
         cfg.max_repair_rounds = 0
 
