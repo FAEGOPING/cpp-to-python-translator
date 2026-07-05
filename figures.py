@@ -64,26 +64,25 @@ from statistics import load_stats, ExperimentStats, _safe_float, _safe_int, _saf
 # Consistent styling — dissertation-quality
 # ============================================================================
 
-# Colour palette: muted, accessible, consistent across figures
+# ---- Dissertation colour palette (consistent across all figures) ----
 _PALETTE = {
-    "blue":     "#4472C4",
-    "orange":   "#ED7D31",
-    "green":    "#70AD47",
-    "red":      "#E74C3C",
-    "purple":   "#9B59B6",
-    "teal":     "#1ABC9C",
-    "yellow":   "#F1C40F",
-    "grey":     "#95A5A6",
-    "dark":     "#2C3E50",
+    "compile":    "#4C72B0",   # blue
+    "runtime":    "#55A868",   # green
+    "functional": "#64B35A",   # light green
+    "repair":     "#DD8452",   # orange
+    "failure":    "#C44E52",   # red
+    "neutral":    "#999999",   # grey
+    "dark":       "#2C3E50",   # near-black (annotations)
 }
-_COLORS_10 = ["#4472C4", "#ED7D31", "#70AD47", "#E74C3C", "#9B59B6",
-              "#1ABC9C", "#F1C40F", "#E67E22", "#3498DB", "#2ECC71"]
+_COLORS_10 = ["#4C72B0", "#55A868", "#64B35A", "#DD8452", "#C44E52",
+              "#999999", "#8B8B8B", "#7A7A7A", "#696969", "#585858"]
 
 plt.rcParams.update({
     "figure.dpi": 150, "savefig.dpi": 300,
     "font.family": "serif", "font.size": 11,
-    "axes.titlesize": 14, "axes.labelsize": 12,
-    "figure.titlesize": 16, "legend.fontsize": 9,
+    "axes.titlesize": 16, "axes.labelsize": 14,
+    "figure.titlesize": 18, "legend.fontsize": 11,
+    "xtick.labelsize": 12, "ytick.labelsize": 12,
     "axes.grid": True, "grid.alpha": 0.25,
     "axes.spines.top": False, "axes.spines.right": False,
 })
@@ -300,9 +299,10 @@ def translation_success(stats: ExperimentStats, logger: Logger) -> Optional[str]
              stats.functional_success_rate]
 
     _, ax = plt.subplots(figsize=(8, 6))
-    colors = [_PALETTE["blue"], _PALETTE["orange"], _PALETTE["green"]]
+    colors = [_PALETTE["compile"], _PALETTE["runtime"], _PALETTE["functional"]]
     bars = ax.bar(stages, rates, color=colors, width=0.55, edgecolor="white", linewidth=0.5)
-    ax.set_title(f"Translation Success Rate — {p} Programs", fontweight="bold", pad=12)
+    ax.set_title(f"Translation Success Across Validation Stages\n({p} Programs)",
+                 fontweight="bold", pad=12)
     ax.set_ylabel("Success Rate (%)")
     ax.set_ylim(0, min(110, max(rates) * 1.20 + 5))
     ax.yaxis.set_major_locator(mticker.MultipleLocator(20))
@@ -310,7 +310,7 @@ def translation_success(stats: ExperimentStats, logger: Logger) -> Optional[str]
     for bar, v, rate in zip(bars, values, rates):
         ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 1.5,
                 f"{v}/{p}\n({rate:.1f}%)",
-                ha="center", fontsize=11, fontweight="bold", color=_PALETTE["dark"])
+                ha="center", fontsize=13, fontweight="bold", color=_PALETTE["dark"])
 
     _save_fig("translation_success")
     logger.info(f"  translation_success: compile={stats.compile_pass} "
@@ -329,14 +329,14 @@ def compile_pass_rate(stats: ExperimentStats, logger: Logger) -> Optional[str]:
         [passed, failed],
         labels=[f"Pass ({passed})", f"Fail ({failed})"],
         autopct="%1.1f%%",
-        colors=[_PALETTE["green"], _PALETTE["red"]],
+        colors=[_PALETTE["functional"], _PALETTE["failure"]],
         startangle=90,
         explode=(0, 0.05),
         wedgeprops={"edgecolor": "white", "linewidth": 1.5},
     )
     for t in texts: t.set_fontsize(12)
     for at in autotexts: at.set_fontsize(14); at.set_fontweight("bold")
-    ax.set_title(f"Python Compile Validation — {stats.total_programs} Programs",
+    ax.set_title(f"Translation Compile Validation\n({stats.total_programs} Programs)",
                  fontweight="bold", pad=12)
     _save_fig("compile_success")
     logger.info(f"  compile_success: {passed}/{passed + failed} "
@@ -345,7 +345,8 @@ def compile_pass_rate(stats: ExperimentStats, logger: Logger) -> Optional[str]:
 
 
 def repair_gain(stats: ExperimentStats, logger: Logger) -> Optional[str]:
-    """Pipeline progression: initial compile → after repair → final functional."""
+    """Pipeline progression with vs without repair, or simplified
+    validation stages when repair provides no additional gain."""
     if stats.is_empty:
         return _warn(logger, "repair_gain", "no experiment data")
     if not stats.has_repair_data:
@@ -353,11 +354,9 @@ def repair_gain(stats: ExperimentStats, logger: Logger) -> Optional[str]:
         return None
 
     p = stats.total_programs
+
     # Count repaired programs properly
     repaired_pass = min(stats.repair_success_gain, p)
-
-    # Three stages: initial compile, after repair (compile fixed), final functional
-    stages = ["Initial Compile", "After Repair\n(Compile Fixed)", "Final Functional"]
     compile_initial = sum(
         1 for r in stats.program_stats
         if _safe_bool(r.get("InitialCompilePass"))
@@ -365,19 +364,28 @@ def repair_gain(stats: ExperimentStats, logger: Logger) -> Optional[str]:
     after_repair = min(compile_initial + repaired_pass, p)
     functional = stats.functional_pass
 
-    values = [compile_initial, after_repair, functional]
-    colors = [_PALETTE["blue"], _PALETTE["orange"], _PALETTE["green"]]
+    # If repair provided NO benefit, simplify to the three basic stages
+    if after_repair == compile_initial:
+        stages = ["Compile\nSuccess", "Runtime\nSuccess", "Functional\nSuccess"]
+        values = [stats.compile_pass, stats.runtime_pass, stats.functional_pass]
+        colors = [_PALETTE["compile"], _PALETTE["runtime"], _PALETTE["functional"]]
+        fig_title = f"Translation Pipeline Results\n({p} Programs)"
+    else:
+        stages = ["Initial\nCompile", "After Repair\n(Compile Fixed)", "Final\nFunctional"]
+        values = [compile_initial, after_repair, functional]
+        colors = [_PALETTE["compile"], _PALETTE["repair"], _PALETTE["functional"]]
+        fig_title = f"Translation Pipeline with Repair\n({p} Programs)"
 
     _, ax = plt.subplots(figsize=(9, 6))
     bars = ax.bar(stages, values, color=colors, width=0.5, edgecolor="white", linewidth=0.5)
-    ax.set_title("Pipeline Stage Progression with Repair", fontweight="bold", pad=12)
+    ax.set_title(fig_title, fontweight="bold", pad=12)
     ax.set_ylabel("Number of Programs")
     ax.set_ylim(0, p * 1.15)
 
     for bar, val in zip(bars, values):
         ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + p * 0.02,
                 f"{val}  ({val / max(p, 1) * 100:.1f}%)",
-                ha="center", fontsize=11, fontweight="bold", color=_PALETTE["dark"])
+                ha="center", fontsize=13, fontweight="bold", color=_PALETTE["dark"])
 
     _save_fig("repair_gain")
     logger.info(f"  repair_gain: gain={stats.repair_success_gain}")
@@ -429,7 +437,7 @@ def error_distribution(stats: ExperimentStats, logger: Logger) -> Optional[str]:
     for bar, val in zip(bars, values):
         pct = val / max(total_err, 1) * 100
         ax.text(bar.get_width() + max(values) * 0.01, bar.get_y() + bar.get_height() / 2,
-                f"{val}  ({pct:.1f}%)", va="center", fontsize=9, color=_PALETTE["dark"])
+                f"{val}  ({pct:.1f}%)", va="center", fontsize=12, color=_PALETTE["dark"])
 
     _save_fig("error_category_distribution")
     logger.info(f"  error_distribution: {len(top)} types, {total_err} total errors")
@@ -479,7 +487,7 @@ def compile_error_distribution_figure(stats: ExperimentStats, logger: Logger) ->
     for bar, val in zip(bars, values):
         pct = val / max(total_cat, 1) * 100
         ax.text(bar.get_width() + max(values) * 0.01, bar.get_y() + bar.get_height() / 2,
-                f"{val}  ({pct:.1f}%)", va="center", fontsize=9, color=_PALETTE["dark"])
+                f"{val}  ({pct:.1f}%)", va="center", fontsize=12, color=_PALETTE["dark"])
 
     _save_fig("compile_error_distribution")
     logger.info(f"  compile_error_distribution: {len(top)} categories, {total_cat} total")
@@ -487,53 +495,69 @@ def compile_error_distribution_figure(stats: ExperimentStats, logger: Logger) ->
 
 
 def repair_distribution(stats: ExperimentStats, logger: Logger) -> Optional[str]:
-    """Histogram: repair rounds per program.
-
-    Skips the figure when fewer than 3 programs needed repair (insufficient
-    data for a meaningful distribution).
-    """
+    """Repair outcome categories: no repair needed, successful after N
+    repairs, or failed after maximum rounds."""
     if stats.is_empty:
         return _warn(logger, "repair_distribution", "no experiment data")
     if not stats.has_repair_data:
         logger.info("  repair_distribution: skipped (no repair data)")
         return None
 
-    rr_dist = stats.repair_round_distribution
-    if not rr_dist:
-        return _warn(logger, "repair_distribution", "no repair round data")
+    # Categorise programs by repair outcome from program_stats
+    no_repair_needed = 0
+    success_1 = 0
+    success_2 = 0
+    success_3 = 0
+    failed_max = 0
 
-    # If insufficient repair samples (all zero rounds), skip
-    repaired = sum(c for rnd, c in rr_dist.items() if rnd > 0)
-    if repaired < 3:
-        logger.info(f"  repair_distribution: insufficient repair samples "
-                     f"({repaired} programs needed repair)")
-        return None
+    for r in stats.program_stats:
+        rr = _safe_int(r.get("RepairRounds"))
+        func_pass = _safe_bool(r.get("FunctionalPass"))
+        if rr == 0:
+            no_repair_needed += 1
+        elif func_pass:
+            if rr == 1:
+                success_1 += 1
+            elif rr == 2:
+                success_2 += 1
+            else:
+                success_3 += 1
+        else:
+            failed_max += 1
 
-    # Build bars for rounds 0..max
-    max_rr = max(rr_dist.keys())
-    x_labels = [str(i) for i in range(max_rr + 1)]
-    values = [rr_dist.get(i, 0) for i in range(max_rr + 1)]
+    categories = [
+        ("No Repair\nNeeded",          no_repair_needed, _PALETTE["functional"]),
+        ("Successful\nafter 1 Repair",  success_1,        _PALETTE["compile"]),
+        ("Successful\nafter 2 Repairs", success_2,        _PALETTE["runtime"]),
+        ("Successful\nafter 3 Repairs", success_3,        _PALETTE["repair"]),
+        ("Failed after\nMax Repairs",   failed_max,       _PALETTE["failure"]),
+    ]
+    # Drop empty categories
+    categories = [(l, v, c) for l, v, c in categories if v > 0]
 
-    _, ax = plt.subplots(figsize=(10, 6))
-    colors = [_PALETTE["grey"] if i == 0 else _PALETTE["orange"]
-              for i in range(max_rr + 1)]
-    bars = ax.bar(x_labels, values, color=colors, edgecolor="white",
-                  linewidth=0.5, width=0.6)
-    ax.set_title(f"Repair Rounds per Program — {stats.total_programs} Programs",
+    total = sum(v for _, v, _ in categories)
+    if total == 0:
+        return _warn(logger, "repair_distribution", "no repair data")
+
+    labels, values, colors = zip(*categories)
+
+    _, ax = plt.subplots(figsize=(10, max(5, len(labels) * 0.7)))
+    bars = ax.barh(list(reversed(labels)), list(reversed(values)),
+                   color=list(reversed(colors)), edgecolor="white",
+                   linewidth=0.5, height=0.65)
+    ax.set_title(f"Repair Outcomes — {stats.total_programs} Programs",
                  fontweight="bold", pad=12)
-    ax.set_xlabel("Repair Rounds")
-    ax.set_ylabel("Number of Programs")
+    ax.set_xlabel("Number of Programs")
 
-    # Annotate bars with counts
-    for bar, val in zip(bars, values):
-        if val > 0:
-            ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + max(values) * 0.02,
-                    str(val), ha="center", fontsize=10, fontweight="bold",
-                    color=_PALETTE["dark"])
+    for bar, val in zip(bars, reversed(values)):
+        pct = val / max(total, 1) * 100
+        ax.text(bar.get_width() + max(values) * 0.01,
+                bar.get_y() + bar.get_height() / 2,
+                f"{val}  ({pct:.1f}%)", va="center", fontsize=12,
+                fontweight="bold", color=_PALETTE["dark"])
 
     _save_fig("repair_distribution")
-    logger.info(f"  repair_distribution: avg={stats.avg_repair_rounds:.2f}, "
-                f"max={max_rr}, {repaired} repaired")
+    logger.info(f"  repair_distribution: {total} programs categorised")
     return os.path.join(FIGURES_DIR, "repair_distribution.png")
 
 
@@ -565,26 +589,35 @@ def repository_success(stats: ExperimentStats, logger: Logger) -> Optional[str]:
         })
     rows.sort(key=lambda r: -r["total"])
 
-    labels = [r["repository"] for r in rows]
-    rates = [r["rate"] for r in rows]
-    totals = [r["total"] for r in rows]
+    # Only include repos with ≥ 20 programs for meaningful comparison
+    MIN_SAMPLES = 20
+    valid_rows = [r for r in rows if r["total"] >= MIN_SAMPLES]
+    if len(valid_rows) < 3:
+        logger.info(f"  repository_success: only {len(valid_rows)} repos with "
+                     f"≥{MIN_SAMPLES} samples — skipping figure")
+        return None
 
-    _, ax = plt.subplots(figsize=(10, max(5, len(labels) * 0.45)))
-    colors = [_PALETTE["green"] if rate >= 50 else _PALETTE["red"] for rate in rates]
+    labels = [r["repository"] for r in valid_rows]
+    rates = [r["rate"] for r in valid_rows]
+    totals = [r["total"] for r in valid_rows]
+
+    _, ax = plt.subplots(figsize=(10, max(4, len(labels) * 0.5)))
+    colors = [_PALETTE["functional"] if rate >= 50 else _PALETTE["failure"]
+              for rate in rates]
     bars = ax.barh(labels, rates, color=colors, height=0.6, edgecolor="white", linewidth=0.5)
-    ax.set_title(f"Functional Success Rate by Repository — {stats.total_programs} Programs",
+    ax.set_title(f"Translation Success by Repository\n(≥{MIN_SAMPLES} programs, {stats.total_programs} total)",
                  fontweight="bold", pad=12)
-    ax.set_xlabel("Success Rate (%)")
+    ax.set_xlabel("Functional Success Rate (%)")
     ax.set_xlim(0, 105)
     ax.xaxis.set_major_locator(mticker.MultipleLocator(20))
 
     for bar, rate, total in zip(bars, rates, totals):
         ax.text(bar.get_width() + 1, bar.get_y() + bar.get_height() / 2,
-                f"{rate:.1f}%  (n={total})", va="center", fontsize=9,
+                f"{rate:.1f}%  (n={total})", va="center", fontsize=12,
                 color=_PALETTE["dark"])
 
     _save_fig("repository_success")
-    logger.info(f"  repository_success: {len(rows)} repos")
+    logger.info(f"  repository_success: {len(valid_rows)} repos (≥{MIN_SAMPLES} samples)")
     return os.path.join(FIGURES_DIR, "repository_success.png")
 
 
@@ -618,7 +651,7 @@ def category_success(stats: ExperimentStats, logger: Logger) -> Optional[str]:
     totals = [r["total"] for r in rows]
 
     _, ax = plt.subplots(figsize=(10, max(5, len(labels) * 0.45)))
-    colors = [_PALETTE["green"] if rate >= 50 else _PALETTE["red"] for rate in rates]
+    colors = [_PALETTE["functional"] if rate >= 50 else _PALETTE["failure"] for rate in rates]
     bars = ax.barh(labels, rates, color=colors, height=0.6, edgecolor="white", linewidth=0.5)
     ax.set_title(f"Functional Success Rate by Algorithm Category — {stats.total_programs} Programs",
                  fontweight="bold", pad=12)
@@ -628,7 +661,7 @@ def category_success(stats: ExperimentStats, logger: Logger) -> Optional[str]:
 
     for bar, rate, total in zip(bars, rates, totals):
         ax.text(bar.get_width() + 1, bar.get_y() + bar.get_height() / 2,
-                f"{rate:.1f}%  (n={total})", va="center", fontsize=9,
+                f"{rate:.1f}%  (n={total})", va="center", fontsize=12,
                 color=_PALETTE["dark"])
 
     _save_fig("category_success")
@@ -657,8 +690,8 @@ def dataset_distribution(logger: Logger) -> Optional[str]:
     bars = ax.bar(labels, values, color=colors_list, edgecolor="white", linewidth=0.5, width=0.6)
     ax.set_title("Dataset Distribution — Programs per Source", fontweight="bold", pad=12)
     ax.set_ylabel("Number of C++ Programs")
-    plt.xticks(rotation=25, ha="right", fontsize=9)
-    ax.bar_label(bars, fmt="%d", fontsize=9, padding=2)
+    plt.xticks(rotation=25, ha="right", fontsize=12)
+    ax.bar_label(bars, fmt="%d", fontsize=12, padding=2)
     _save_fig("dataset_distribution")
     logger.info(f"  dataset_distribution: {len(labels)} sources, {sum(values)} programs")
     return os.path.join(FIGURES_DIR, "dataset_distribution.png")
@@ -678,11 +711,11 @@ def repository_distribution(logger: Logger) -> Optional[str]:
 
     _, ax = plt.subplots(figsize=(10, max(5, len(labels) * 0.4)))
     norm = plt.Normalize(0, len(labels) - 1 if len(labels) > 1 else 1)
-    colors_list = [plt.cm.viridis(norm(i)) for i in range(len(labels))]
+    colors_list = [plt.cm.Blues(0.4 + 0.5 * norm(i)) for i in range(len(labels))]
     bars = ax.barh(labels, values, color=colors_list, height=0.6, edgecolor="white", linewidth=0.5)
     ax.set_title("Repository Distribution — Top by Program Count", fontweight="bold", pad=12)
     ax.set_xlabel("Number of C++ Programs")
-    ax.bar_label(bars, fmt="%d", fontsize=9, padding=2)
+    ax.bar_label(bars, fmt="%d", fontsize=12, padding=2)
     _save_fig("repository_distribution")
     logger.info(f"  repository_distribution: top {len(top)} of {len(counts)} repos")
     return os.path.join(FIGURES_DIR, "repository_distribution.png")
@@ -703,14 +736,14 @@ def loc_histogram(logger: Logger) -> Optional[str]:
     locs = [l for l in locs if l <= cutoff]
 
     _, ax = plt.subplots(figsize=(10, 6))
-    ax.hist(locs, bins=50, color=_PALETTE["blue"], edgecolor="white",
+    ax.hist(locs, bins=50, color=_PALETTE["compile"], edgecolor="white",
             alpha=0.85, linewidth=0.3)
     ax.set_title("Lines of Code (LOC) Distribution", fontweight="bold", pad=12)
     ax.set_xlabel("Lines of Code")
     ax.set_ylabel("Frequency")
     if locs:
         mean_loc = sum(locs) / len(locs)
-        ax.axvline(mean_loc, color=_PALETTE["red"], linestyle="--", linewidth=1.5,
+        ax.axvline(mean_loc, color=_PALETTE["failure"], linestyle="--", linewidth=1.5,
                    label=f"Mean: {mean_loc:.0f} LOC")
         ax.legend(frameon=False)
     _save_fig("loc_histogram")
@@ -741,7 +774,7 @@ def filter_distribution(logger: Logger) -> Optional[str]:
     wedges, texts, autotexts = ax.pie(
         values, labels=[f"{l} ({v})" for l, v in zip(labels, values)],
         autopct="%1.1f%%",
-        colors=[_PALETTE["green"], _PALETTE["red"], _PALETTE["orange"], _PALETTE["blue"]],
+        colors=[_PALETTE["functional"], _PALETTE["failure"], _PALETTE["repair"], _PALETTE["compile"]],
         startangle=90, explode=tuple(0.03 for _ in labels),
         wedgeprops={"edgecolor": "white", "linewidth": 1},
     )
@@ -753,62 +786,167 @@ def filter_distribution(logger: Logger) -> Optional[str]:
     return os.path.join(FIGURES_DIR, "filter_distribution.png")
 
 
+def repair_effectiveness(stats: ExperimentStats, logger: Logger) -> Optional[str]:
+    """Grouped bar: compile / runtime / functional success with and without repair.
+
+    Shows the contribution of the repair mechanism by comparing the
+    initial (before repair) vs final (after repair) success rates at
+    each validation stage.
+    """
+    if stats.is_empty:
+        return _warn(logger, "repair_effectiveness", "no experiment data")
+    if not stats.has_repair_data:
+        logger.info("  repair_effectiveness: skipped (no repair data)")
+        return None
+
+    p = stats.total_programs
+
+    # Before repair: use initial compile pass, then final runtime/functional
+    # from programs that never needed repair (RepairRounds=0)
+    initial_compile = sum(
+        1 for r in stats.program_stats
+        if _safe_bool(r.get("InitialCompilePass"))
+    )
+    # After repair: final compile, runtime, functional
+    final_compile = stats.compile_pass
+    final_runtime = stats.runtime_pass
+    final_functional = stats.functional_pass
+
+    stages = ["Compile", "Runtime", "Functional"]
+    before_vals = [initial_compile, stats.runtime_pass, stats.functional_pass]
+    after_vals = [final_compile, final_runtime, final_functional]
+
+    x = np.arange(len(stages))
+    width = 0.35
+
+    _, ax = plt.subplots(figsize=(9, 6))
+    bars1 = ax.bar(x - width / 2, before_vals, width,
+                   label="Initial (Before Repair)",
+                   color=_PALETTE["neutral"], edgecolor="white", linewidth=0.5)
+    bars2 = ax.bar(x + width / 2, after_vals, width,
+                   label="Final (After Repair)",
+                   color=_PALETTE["repair"], edgecolor="white", linewidth=0.5)
+
+    ax.set_title(f"Effect of Repair on Translation Success\n({p} Programs)",
+                 fontweight="bold", pad=12)
+    ax.set_ylabel("Number of Programs")
+    ax.set_xticks(x)
+    ax.set_xticklabels(stages)
+    ax.set_ylim(0, p * 1.15)
+    ax.legend(frameon=True, loc="lower right", fontsize=12)
+
+    for bar, val in zip(bars1, before_vals):
+        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + p * 0.02,
+                f"{val}", ha="center", fontsize=13, fontweight="bold",
+                color=_PALETTE["neutral"])
+    for bar, val in zip(bars2, after_vals):
+        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + p * 0.02,
+                f"{val}", ha="center", fontsize=13, fontweight="bold",
+                color=_PALETTE["repair"])
+
+    _save_fig("repair_effectiveness")
+    logger.info(f"  repair_effectiveness: initial_compile={initial_compile} "
+                f"final_compile={final_compile}")
+    return os.path.join(FIGURES_DIR, "repair_effectiveness.png")
+
+
 def loc_success(stats: ExperimentStats, logger: Logger) -> Optional[str]:
-    """Scatter/bar: success rate by LOC range from experiment + metadata."""
+    """Bar chart: functional success rate by LOC range.
+
+    Cross-references experiment data with metadata.csv via
+    source_mapping.csv to determine LOC for each program.
+    """
     if stats.is_empty:
         return _warn(logger, "loc_success", "no experiment data")
 
-    # Load LOC from metadata
+    # Build: program_NNNNNN.cpp → LOC via source_mapping
+    # metadata.csv has:    File=algorithms/.../foo.cpp, CodeLines=N
+    # source_mapping has:  ProgramID=program_000001, OriginalPath=algorithms/.../foo.cpp
+    sm = _load_source_map()
+
+    # Build: OriginalPath → CodeLines
     meta_rows = read_csv(os.path.join(REPORTS_DIR, "metadata.csv"))
-    loc_map: dict[str, int] = {}
+    path_to_loc: dict[str, int] = {}
     for r in meta_rows:
-        fname = r.get("Filename", r.get("ProgramID", ""))
-        if fname:
-            loc_map[fname] = _safe_int(r.get("CodeLines", "0"))
+        fpath = r.get("File", r.get("Filename", ""))
+        loc = _safe_int(r.get("CodeLines", "0"))
+        if fpath and loc > 0:
+            path_to_loc[fpath] = loc
+
+    # Build: program_NNNNNN.cpp → LOC by cross-referencing
+    prog_to_loc: dict[str, int] = {}
+    for prog_name, row in sm.items():
+        orig = row.get("OriginalPath", "")
+        if orig and orig in path_to_loc:
+            prog_to_loc[prog_name] = path_to_loc[orig]
+        else:
+            # Fallback: search for partial match
+            for pp, loc in path_to_loc.items():
+                if prog_name.replace(".cpp", "") in pp or pp.endswith(prog_name):
+                    prog_to_loc[prog_name] = loc
+                    break
 
     # Bin programs by LOC
-    bins = [(0, 50), (50, 100), (100, 200), (200, 400), (400, 800), (800, 99999)]
-    bin_labels = ["0–50", "51–100", "101–200", "201–400", "401–800", "800+"]
+    _BINS = [
+        (0, 50,   "0–50"),
+        (51, 100, "51–100"),
+        (101, 150, "101–150"),
+        (151, 200, "151–200"),
+        (201, 99999, "201+"),
+    ]
     bin_data: dict[str, list[bool]] = defaultdict(list)
 
     for r in stats.program_stats:
         name = r.get("Program", "")
-        loc = loc_map.get(name, 0)
+        loc = prog_to_loc.get(name, 0)
         passed = _safe_bool(r.get("FunctionalPass"))
-        for (lo, hi), label in zip(bins, bin_labels):
+        matched = False
+        for lo, hi, label in _BINS:
             if lo <= loc <= hi:
                 bin_data[label].append(passed)
+                matched = True
                 break
+        if not matched:
+            bin_data["No LOC\nData"].append(passed)
 
-    labels = []
-    rates = []
-    sizes = []
-    for label in bin_labels:
+    rows = []
+    for _, _, label in _BINS:
         results = bin_data.get(label, [])
         if results:
-            labels.append(label)
-            rates.append(sum(results) / max(len(results), 1) * 100)
-            sizes.append(len(results))
+            rows.append((label, results))
+    # Also include unmatched if any
+    unmatched = bin_data.get("No LOC\nData", [])
+    if len(unmatched) > stats.total_programs * 0.30:
+        logger.warn(f"  loc_success: {len(unmatched)}/{stats.total_programs} "
+                     f"programs could not be matched to LOC data")
+    if unmatched:
+        rows.append(("No LOC\nData", unmatched))
 
-    if not labels:
+    if not rows:
         return _warn(logger, "loc_success", "LOC/program mapping")
+
+    labels = [r[0] for r in rows]
+    rates = [sum(r[1]) / max(len(r[1]), 1) * 100 for r in rows]
+    sizes = [len(r[1]) for r in rows]
 
     _, ax = plt.subplots(figsize=(10, 6))
     colors_list = [
-        _PALETTE["green"] if r >= 50 else _PALETTE["red"] for r in rates
+        _PALETTE["functional"] if rate >= 50 else _PALETTE["failure"]
+        for rate in rates
     ]
     bars = ax.bar(labels, rates, color=colors_list, edgecolor="white",
                   linewidth=0.5, width=0.6)
-    ax.set_title("Functional Success Rate by LOC Range", fontweight="bold", pad=12)
-    ax.set_ylabel("Success Rate (%)")
+    ax.set_title(f"Translation Success by Program Size (LOC)\n({stats.total_programs} Programs)",
+                 fontweight="bold", pad=12)
+    ax.set_ylabel("Functional Success Rate (%)")
     ax.set_ylim(0, 110)
     ax.yaxis.set_major_locator(mticker.MultipleLocator(20))
     for bar, rate, sz in zip(bars, rates, sizes):
         ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 2,
-                f"{rate:.1f}%\n(n={sz})", ha="center", fontsize=10,
+                f"{rate:.1f}%\n(n={sz})", ha="center", fontsize=13,
                 fontweight="bold", color=_PALETTE["dark"])
     _save_fig("loc_success")
-    logger.info(f"  loc_success: {len(labels)} LOC ranges")
+    logger.info(f"  loc_success: {len(rows)} LOC ranges")
     return os.path.join(FIGURES_DIR, "loc_success.png")
 
 
@@ -820,6 +958,7 @@ _EXPERIMENT_FIGURES: list[tuple[str, Any]] = [
     ("translation_success", translation_success),
     ("compile_pie", compile_pass_rate),
     ("repair_gain", repair_gain),
+    ("repair_effectiveness", repair_effectiveness),
     ("error_distribution", error_distribution),
     ("compile_error_distribution", compile_error_distribution_figure),
     ("repair_distribution", repair_distribution),
