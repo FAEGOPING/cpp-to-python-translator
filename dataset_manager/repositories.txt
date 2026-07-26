@@ -11,12 +11,6 @@
 
 algorithms  https://github.com/TheAlgorithms/C-Plus-Plus.git
 
-codeforces  https://github.com/AmanZishan/Codeforces-Problem-Solved.git
+leetcode    https://github.com/haoel/leetcode.git
 
-codeforces  https://github.com/gh0St-henry/Competitive-Programming.git
-
-codeforces  https://github.com/arafat2811/ProblemSolving.git
-
-codeforces  https://github.com/arafat2811/Striver-SDE-Sheet-Challenge.git
-
-cses        https://github.com/topics12/CSES-Solutions.git
+cses        https://github.com/mrsac7/CSES-Solutions.git
