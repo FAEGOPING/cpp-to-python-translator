@@ -64,9 +64,16 @@ class Config:
     """Timeout in seconds for subprocess execution (C++ and Python)."""
 
     # ---- Automatic test generation -------------------------------------------
-    auto_test: bool = False
-    """When ``True``, automatically generate additional test cases beyond
-    those provided manually in ``.in`` / ``.out`` files."""
+    auto_test: bool = True
+    """When ``True`` (the default), automatically generate additional test
+    cases beyond those provided manually in ``.in`` / ``.out`` files.
+
+    Generated cases make differential testing meaningful for the large
+    majority of programs that ship without any ``.in`` / ``.out`` files
+    (otherwise validation degrades to a single empty-input comparison).
+    Set to ``False`` to validate only against manual test files — or a
+    single empty-input case when none exist.
+    """
 
     generated_cases: int = 50
     """Number of test cases to generate when ``auto_test`` is enabled."""

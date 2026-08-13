@@ -52,7 +52,6 @@ from typing import Optional
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 PAPER_ROOT = PROJECT_ROOT / "paper_results"
-TRANSLATED_DIR = PROJECT_ROOT / "translated"
 FIGURES_SRC = PROJECT_ROOT / "dataset_manager" / "reports" / "figures"
 
 
@@ -195,10 +194,16 @@ def archive_paper_results(
         _log(f"  Copied {fig_count} figure(s)")
 
     # ---- copy translated programs ----
+    # Source from THIS run's snapshot (``run_dir/translated``), not the
+    # shared global ``translated/`` directory.  The global directory can
+    # hold files left behind by a *previous* experiment (e.g. a repair run
+    # overwriting a baseline run), which would corrupt the baseline-vs-repair
+    # separation in the archive.
     trans_dst = archive_dir / "translated"
+    run_trans_dir = Path(run_dir) / "translated"
     py_count = 0
-    if TRANSLATED_DIR.is_dir():
-        for f in TRANSLATED_DIR.glob("*.py"):
+    if run_trans_dir.is_dir():
+        for f in run_trans_dir.glob("*.py"):
             try:
                 shutil.copy2(f, trans_dst / f.name)
                 py_count += 1

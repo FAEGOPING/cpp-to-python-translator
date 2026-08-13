@@ -40,6 +40,17 @@ TestCase = Tuple[str, Optional[str]]
 _MAX_ARRAY_SIZE = 10
 _MAX_INPUT_SIZE = 4096  # safety cap on generated input size
 
+# Representable range per C++ integer type, used to clamp boundary values so
+# generated inputs never overflow the declared type (overflow would trigger
+# C++ undefined behaviour and spurious C++↔Python mismatches).  ``long`` and
+# ``long long`` are both 64-bit on the LP64 platforms this project targets.
+_INT_RANGES: dict[str, tuple[int, int]] = {
+    "short": (-(2**15), 2**15 - 1),
+    "int": (-(2**31), 2**31 - 1),
+    "long": (-(2**63), 2**63 - 1),
+    "longlong": (-(2**63), 2**63 - 1),
+}
+
 
 class TestGenerator:
     """Generates temporary test cases for a given C++ program.
@@ -144,13 +155,16 @@ class TestGenerator:
     # Strategy: boundary
     # ------------------------------------------------------------------
 
-    # Typical boundary values for integer inputs
+    # Typical boundary values for integer inputs.
+    #
+    # Deliberately excludes INT32/INT64 extremes: feeding those to an
+    # arithmetic program triggers C++ signed-overflow (undefined
+    # behaviour) that Python's arbitrary-precision integers do not
+    # replicate, producing spurious C++↔Python mismatches for *correct*
+    # translations.  These values stay well within 32-bit range so the
+    # program runs identically in both languages.
     _BOUNDARY_VALUES: tuple[int, ...] = (
         0, 1, -1,
-        2**31 - 1,          # INT32_MAX
-        -(2**31),           # INT32_MIN
-        2**63 - 1,          # INT64_MAX
-        -(2**63),           # INT64_MIN
         255, -255,
         65535, -65535,
         1000000, -1000000,
@@ -172,7 +186,15 @@ class TestGenerator:
                 )
             else:
                 if structure.scalar_vars:
-                    parts = [str(values[i % len(values)]) for _ in structure.scalar_vars]
+                    # Route through _generate_scalar_value so each scalar
+                    # gets a value appropriate to its declared type.
+                    parts = [
+                        _generate_scalar_value(
+                            var.var_type, self._rng, "boundary",
+                            boundary_override=values[i % len(values)],
+                        )
+                        for var in structure.scalar_vars
+                    ]
                     inp = "\n".join(parts) + "\n"
                 else:
                     inp = f"{values[i % len(values)]}\n"
@@ -185,15 +207,12 @@ class TestGenerator:
     # ------------------------------------------------------------------
 
     _EDGE_INPUTS: tuple[str, ...] = (
-        "",             # empty input
-        "\n",           # just newline
         "0\n",          # zero
         "-1\n",         # negative one
         "999999999\n",  # large positive
         "-999999999\n", # large negative
         "0 0\n",        # multiple zeros
         "1 2 3 4 5\n",  # multiple values
-        " \n",          # whitespace only
     )
 
     def _generate_edge(
@@ -368,22 +387,39 @@ class _InputStructure:
         """
         lines: list[str] = []
 
+        # Names of scalar variables that control the size of at least one
+        # array read (e.g. ``n`` in ``cin >> n; for(i<n) cin >> a[i]``).
+        # These must be emitted as small positive counts so the number of
+        # array elements that follow actually matches what the program
+        # will consume.
+        bound_names = {a.count_var for a in self.arrays if a.count_var}
+        bound_names |= {
+            a.count_var for outer, inner in self.nested_arrays
+            for a in (outer, inner) if a.count_var
+        }
+        emitted_counts: dict[str, int] = {}
+
         # First: emit scalar variables in declaration order
         for var in self.scalar_vars:
-            val = _generate_scalar_value(var.var_type, rng, mode, boundary_override)
-            lines.append(val)
+            if var.name in bound_names:
+                count = rng.randint(1, _MAX_ARRAY_SIZE)
+                emitted_counts[var.name] = count
+                lines.append(str(count))
+            else:
+                val = _generate_scalar_value(var.var_type, rng, mode, boundary_override)
+                lines.append(val)
 
         # Second: emit array elements
         for arr in self.arrays:
-            count = _resolve_count(arr, rng)
+            count = self._count_for(arr, rng, emitted_counts)
             for _ in range(count):
                 val = _generate_scalar_value(arr.var_type, rng, mode, boundary_override)
                 lines.append(val)
 
         # Third: emit 2D array elements (row-major)
         for outer, inner in self.nested_arrays:
-            outer_count = _resolve_count(outer, rng)
-            inner_count = _resolve_count(inner, rng)
+            outer_count = self._count_for(outer, rng, emitted_counts)
+            inner_count = self._count_for(inner, rng, emitted_counts)
             for _ in range(outer_count):
                 for _ in range(inner_count):
                     val = _generate_scalar_value(
@@ -397,6 +433,22 @@ class _InputStructure:
             lines.append(val)
 
         return "\n".join(lines) + "\n"
+
+    @staticmethod
+    def _count_for(
+        arr: _ArrayRead,
+        rng: random.Random,
+        emitted_counts: dict[str, int],
+    ) -> int:
+        """Resolve the number of elements for *arr*.
+
+        When the array's bound variable was already emitted as a scalar
+        (e.g. ``n``), reuse that exact value so the input is structurally
+        consistent; otherwise fall back to :func:`_resolve_count`.
+        """
+        if arr.count_var and arr.count_var in emitted_counts:
+            return emitted_counts[arr.count_var]
+        return _resolve_count(arr, rng)
 
 
 # ======================================================================
@@ -551,10 +603,11 @@ def _generate_scalar_value(
 
     if var_type in int_types:
         if boundary_override is not None:
-            return str(boundary_override)
+            lo, hi = _INT_RANGES.get(var_type, (-(2**63), 2**63 - 1))
+            return str(max(lo, min(hi, boundary_override)))
         if mode == "boundary":
             return str(rng.choice([
-                0, 1, -1, 2**31 - 1, -(2**31), 255, -255, 1000000, -1000000,
+                0, 1, -1, 255, -255, 65535, -65535, 1000000, -1000000,
             ]))
         if mode == "edge":
             return rng.choice(["0", "-1", "999999999", "-999999999"])
@@ -563,7 +616,7 @@ def _generate_scalar_value(
         # heuristic: mix of strategies
         choice = rng.choice(["boundary", "zero", "small", "random"])
         if choice == "boundary":
-            return str(rng.choice([0, 1, -1, 2**31 - 1, -(2**31), 255, 1000000]))
+            return str(rng.choice([0, 1, -1, 255, -255, 1000000, -1000000]))
         if choice == "zero":
             return "0"
         if choice == "small":

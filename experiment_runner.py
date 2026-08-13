@@ -582,6 +582,26 @@ def _record_config(args: argparse.Namespace, run_dir: str,
 # Translation pipeline integration
 # ============================================================================
 
+def _clean_translated_dir() -> None:
+    """Remove stale translated ``.py`` files before a fresh experiment run.
+
+    ``translated/`` is shared across runs; without cleaning, files left by a
+    previous repair/baseline run would be copied into this run's
+    ``run_dir/translated/`` snapshot and archived, corrupting the
+    baseline-vs-repair separation.  Preserves ``example.py`` (mirroring how
+    :func:`_prepare_samples_dir` preserves ``example.*``).
+    """
+    cfg = _get_run_config()
+    trans = cfg.translated_dir
+    os.makedirs(trans, exist_ok=True)
+    for f in os.listdir(trans):
+        if f.startswith("program_") and f.endswith(".py"):
+            try:
+                os.remove(os.path.join(trans, f))
+            except OSError:
+                pass
+
+
 def _prepare_samples_dir(program_files: List[str]) -> str:
     """Copy selected benchmark programs into the samples directory.
 
@@ -665,6 +685,14 @@ def _run_translation_experiment(
     # Copy programs to samples/
     _prepare_samples_dir(program_files)
     logger.info(f"  Programs staged: {len(program_files)}")
+
+    # On a fresh run, clear the shared ``translated/`` directory so outputs
+    # from a previous experiment (e.g. a repair run overwriting a baseline)
+    # don't leak into this run's archive.  Skipped in resume mode, where the
+    # previously translated files for already-completed programs must be kept.
+    if not getattr(args, "resume", False):
+        _clean_translated_dir()
+        logger.info(f"  Translated dir cleared for fresh run")
 
     # Discover C++ files in samples/
     from run import process_program, _cleanup_cpp_cache

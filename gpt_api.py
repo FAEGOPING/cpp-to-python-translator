@@ -266,8 +266,16 @@ def call_gpt_structured(prompt: str, max_tokens: int = 0) -> CallResult:
                 create_kwargs: dict = {
                     "model": "deepseek-v4-pro",
                     "messages": [{"role": "user", "content": prompt}],
-                    "temperature": 0,
                     "timeout": _API_TIMEOUT,
+                    # Enable DeepSeek thinking mode at "medium" effort — a
+                    # balance between quality and speed/cost.  Thinking is on
+                    # by default at higher effort; "medium" reduces reasoning
+                    # tokens vs the default.  The ``thinking`` object is passed
+                    # via extra_body because the OpenAI SDK has no native field
+                    # for DeepSeek's Anthropic-style ``thinking`` parameter;
+                    # effort is the SDK's own ``reasoning_effort`` field.
+                    "reasoning_effort": "medium",
+                    "extra_body": {"thinking": {"type": "enabled"}},
                 }
                 if max_tokens > 0:
                     create_kwargs["max_tokens"] = max_tokens

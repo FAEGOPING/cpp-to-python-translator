@@ -1263,6 +1263,19 @@ def process_program(program_path: str) -> None:
 
         # Combine manual + generated for differential testing
         all_test_cases = test_cases + generated_cases
+
+        # Drop empty-input cases from validation.  An empty stdin exercises
+        # EOF-handling semantics (Python's input() raises EOFError while C++
+        # extraction fails to a default value) rather than program logic, so it
+        # produces spurious failures for any translation that uses input().
+        # When every case would be dropped (auto-test disabled and no .in
+        # file), fall back to the original list to preserve legacy behaviour.
+        non_empty = [
+            (inp, exp) for (inp, exp) in all_test_cases
+            if inp is not None and inp.strip() != ""
+        ]
+        if non_empty:
+            all_test_cases = non_empty
         total_test_count = len(all_test_cases)
 
         # -- execution cache -----------------------------------------------------
@@ -1273,7 +1286,7 @@ def process_program(program_path: str) -> None:
         # Try translation cache first (avoids unnecessary LLM API calls)
         stage = "translation"
         _dbg("before cache lookup", program_name, start_time)
-        cached = _cache_lookup(program_name)
+        cached = _cache_lookup(program_name, cpp_code)
         if cached is not None:
             python_code = cached
             translation_time = 0.0
@@ -1290,7 +1303,7 @@ def process_program(program_path: str) -> None:
             _dbg(f"LLM returned {len(python_code)} chars", program_name, start_time)
             mon.record_translation(translation_time)
             mon.record_api_wait(_trans_result.elapsed_seconds)
-            _cache_save(program_name, python_code)
+            _cache_save(program_name, cpp_code, python_code)
             _dbg("cache SAVED", program_name, start_time)
 
         initial_compile_pass: bool = False
@@ -1415,37 +1428,42 @@ def process_program(program_path: str) -> None:
                 passed_count = 1 if func_ok else 0
                 sr = passed_count / max(total_test_count, 1)
                 report = None
-                if not func_ok and mismatch.startswith("C++_EXECUTION_FAILED:"):
-                    # Cannot validate — C++ baseline failed
-                    log_result(
-                        program_name, 0,
-                        compile_pass=True, runtime_pass=True, functional_pass=False,
-                        error_type="CppExecutionFailed", elapsed_time=elapsed,
-                        repair_count=0,
-                        translation_time=translation_time,
-                        compile_time=compile_time, runtime_time=runtime_time,
-                        validation_time=validation_time,
-                        generated_test_count=len(generated_cases),
-                        executed_test_count=total_test_count, passed_test_count=0,
-                        success_rate=0.0, failure_reason=mismatch[:200],
-                        final_error_type="CppExecutionFailed",
-                        total_repair_attempts=0,
-                    )
-                    log_summary(
-                        program_name,
-                        initial_compile_pass=True, final_compile_pass=True,
-                        runtime_pass=True, functional_pass=False,
-                        repair_rounds=0, total_time=elapsed,
-                        translation_time=translation_time,
-                        validation_time=validation_time,
-                        generated_test_count=len(generated_cases),
-                        executed_test_count=total_test_count,
-                        passed_test_count=0, success_rate=0.0,
-                        final_error_type="CppExecutionFailed",
-                        error_category="unknown", total_repair_attempts=0,
-                    )
-                    save_code(program_name, python_code)
-                    return
+
+            # Cannot validate — the C++ oracle itself failed to run
+            if not func_ok and (
+                (report is not None and report.oracle_failed)
+                or (report is None and mismatch.startswith("C++_EXECUTION_FAILED:"))
+            ):
+                log_result(
+                    program_name, 0,
+                    compile_pass=True, runtime_pass=True, functional_pass=False,
+                    error_type="CppExecutionFailed", elapsed_time=elapsed,
+                    repair_count=0,
+                    translation_time=translation_time,
+                    compile_time=compile_time, runtime_time=runtime_time,
+                    validation_time=validation_time,
+                    generated_test_count=len(generated_cases),
+                    executed_test_count=total_test_count, passed_test_count=0,
+                    success_rate=0.0, failure_reason=mismatch[:200],
+                    final_error_type="CppExecutionFailed",
+                    total_repair_attempts=0,
+                )
+                log_summary(
+                    program_name,
+                    initial_compile_pass=True, final_compile_pass=True,
+                    runtime_pass=True, functional_pass=False,
+                    repair_rounds=0, total_time=elapsed,
+                    translation_time=translation_time,
+                    validation_time=validation_time,
+                    generated_test_count=len(generated_cases),
+                    executed_test_count=total_test_count,
+                    passed_test_count=0, success_rate=0.0,
+                    final_error_type="CppExecutionFailed",
+                    error_category="unknown", total_repair_attempts=0,
+                )
+                save_code(program_name, python_code)
+                return
+
             mon.record_functional(validation_time)
             _dbg("before final CSV logging", program_name, start_time)
 
@@ -1670,7 +1688,11 @@ def process_program(program_path: str) -> None:
 
             if not func_ok:
                 # Distinguish C++ oracle failure from real mismatch
-                if mismatch.startswith("C++_EXECUTION_FAILED:"):
+                oracle_failed = (
+                    (report is not None and report.oracle_failed)
+                    or (report is None and mismatch.startswith("C++_EXECUTION_FAILED:"))
+                )
+                if oracle_failed:
                     if cfg.verbose_output:
                         print(f"\n  ⚠️  Round {round_num}: Cannot validate — "
                               f"C++ execution failed")

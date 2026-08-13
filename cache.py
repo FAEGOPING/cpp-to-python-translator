@@ -37,6 +37,44 @@ from typing import Callable
 
 
 # ======================================================================
+# C++ compiler detection (shared with dataset_manager/utils.detect_compiler)
+# ======================================================================
+
+_compiler_info: dict | None = None
+
+
+def _get_cpp_compiler() -> dict:
+    """Return the detected C++ compiler (``{"executable", "flags"}``).
+
+    Reuses the platform's own compiler detection (GNU GCC first, then
+    clang++) so that ``#include <bits/stdc++.h>`` and other GCC-specific
+    headers compile.  The result is cached after the first call.
+
+    Returns:
+        A dict with ``executable`` and ``flags`` keys.  When no compiler
+        is detected the dict falls back to a bare ``"g++"`` so that the
+        downstream ``FileNotFoundError`` handler still reports a friendly
+        error message.
+    """
+    global _compiler_info
+    if _compiler_info is None:
+        try:
+            from dataset_manager.utils import get_compiler
+
+            info = get_compiler()
+            _compiler_info = {
+                "executable": info["executable"],
+                "flags": info["flags"],
+            }
+        except (ImportError, RuntimeError):
+            # dataset_manager unavailable, or no compiler on PATH — fall
+            # back to a bare ``g++`` and let the subprocess raise
+            # FileNotFoundError below, preserving the old behaviour.
+            _compiler_info = {"executable": "g++", "flags": "-std=c++17"}
+    return _compiler_info
+
+
+# ======================================================================
 # Execution result cache
 # ======================================================================
 
@@ -228,9 +266,18 @@ class CppBinaryCache:
         fd, exe_path = tempfile.mkstemp(suffix=".cpp_bin")
         os.close(fd)
 
+        compiler = _get_cpp_compiler()
+        compile_cmd = [
+            compiler["executable"],
+            *compiler["flags"].split(),
+            cpp_file,
+            "-o",
+            exe_path,
+        ]
+
         try:
             compile_result = subprocess.run(
-                ["g++", "-std=c++17", cpp_file, "-o", exe_path],
+                compile_cmd,
                 capture_output=True,
                 text=True,
                 timeout=timeout,
@@ -241,7 +288,8 @@ class CppBinaryCache:
         except FileNotFoundError:
             _try_remove(exe_path)
             return False, (
-                "g++ not found — please install g++ to enable "
+                f"C++ compiler not found ({compiler['executable']}) — "
+                "please install g++ (GNU GCC) or clang++ to enable "
                 "C++ compilation and functional validation."
             )
 

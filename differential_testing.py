@@ -95,24 +95,71 @@ class DiffReport:
         return sum(1 for r in self.test_results if r.passed)
 
     @property
+    def validated(self) -> int:
+        """Number of test cases where the C++ oracle ran successfully.
+
+        Only these cases can meaningfully be compared against the
+        translated Python.  Cases where the oracle itself crashed (e.g.
+        a generated input that violated the program's implicit
+        preconditions) are excluded and reported separately.
+        """
+        return sum(1 for r in self.test_results if r.cpp_ok)
+
+    @property
+    def oracle_failures(self) -> int:
+        """Number of test cases where the C++ oracle failed to run."""
+        return self.total - self.validated
+
+    @property
     def failed(self) -> int:
-        """Number of test cases that failed."""
-        return self.total - self.passed
+        """Number of *validated* test cases where the translation failed.
+
+        Only counts genuine translation failures (Python crash or output
+        mismatch).  Cases where the C++ oracle itself crashed are
+        **skipped**, not failed, since there is no oracle output to
+        compare against.
+        """
+        return sum(1 for r in self.test_results if r.cpp_ok and not r.passed)
 
     @property
     def all_passed(self) -> bool:
-        """``True`` when every test case passed."""
-        return self.failed == 0 and self.total > 0
+        """``True`` when at least one case was validated and none failed.
+
+        Oracle-crash cases are ignored: they do not fail the run, but a
+        run where **no** case could be validated is not a pass.
+        """
+        return self.validated > 0 and self.failed == 0
 
     @property
     def summary(self) -> str:
         """One-line summary string."""
-        return (
-            f"Differential Testing: {self.passed}/{self.total} passed"
-            + ("" if self.all_passed else f", {self.failed} FAILED")
-        )
+        if not self.validated:
+            return "Differential Testing: no cases could be validated (oracle failed)"
+        text = f"Differential Testing: {self.passed}/{self.validated} passed"
+        if self.failed:
+            text += f", {self.failed} FAILED"
+        if self.oracle_failures:
+            text += f", {self.oracle_failures} skipped (oracle failed)"
+        return text
+
+    @property
+    def oracle_failed(self) -> bool:
+        """``True`` when the C++ oracle failed to run on **every** test case.
+
+        This signals that the baseline program could not be executed at
+        all (typically a compile failure), so the translation cannot be
+        validated — there is no oracle output to compare against.  A
+        per-input C++ runtime failure on only a *subset* of cases is
+        **not** treated as a full oracle failure, since the remaining
+        cases can still be compared.
+        """
+        return self.total > 0 and all(not r.cpp_ok for r in self.test_results)
 
     # -- reporting -----------------------------------------------------------
+
+    def _genuine_failures(self) -> list[SingleTestResult]:
+        """Test cases where the translation genuinely failed (oracle ran)."""
+        return [r for r in self.test_results if r.cpp_ok and not r.passed]
 
     def mismatch_report(self, max_cases: int = _MAX_MISMATCH_DETAIL) -> str:
         """Human-readable report of all failing test cases.
@@ -123,8 +170,13 @@ class DiffReport:
         Returns:
             Formatted multi-line report string.
         """
-        failures = [r for r in self.test_results if not r.passed]
+        failures = self._genuine_failures()
         if not failures:
+            if self.oracle_failures:
+                return (
+                    f"No translation mismatches — {self.passed} case(s) passed, "
+                    f"{self.oracle_failures} skipped (oracle failed)."
+                )
             return "All test cases passed — no mismatches."
 
         lines: list[str] = []
@@ -132,8 +184,9 @@ class DiffReport:
         lines.append("DIFFERENTIAL TESTING FAILURE REPORT")
         lines.append(f"{'=' * 60}")
         lines.append(
-            f"  Total: {self.total}  |  Passed: {self.passed}"
-            f"  |  Failed: {self.failed}"
+            f"  Total: {self.total}  |  Validated: {self.validated}"
+            f"  |  Passed: {self.passed}  |  Failed: {self.failed}"
+            f"  |  Skipped (oracle failed): {self.oracle_failures}"
         )
         lines.append("")
 
@@ -177,8 +230,13 @@ class DiffReport:
         Returns:
             A string suitable for pasting into an LLM context window.
         """
-        failures = [r for r in self.test_results if not r.passed]
+        failures = self._genuine_failures()
         if not failures:
+            if self.oracle_failures:
+                return (
+                    f"All validated tests passed "
+                    f"({self.oracle_failures} oracle failures skipped)."
+                )
             return "All tests passed."
 
         selected = _select_representative_failures(failures)
