@@ -40,3 +40,8 @@ skip_programs.json
 
 # Translation cache — reusable LLM translations
 translation_cache/
+
+# Staging directory — benchmark programs copied in per experiment run
+samples/program_*.cpp
+samples/program_*.in
+samples/program_*.out
