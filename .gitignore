@@ -19,10 +19,9 @@ analysis_report.txt
 *.bak
 
 # Dataset Manager — generated outputs (keep .gitkeep for directory structure)
+# benchmark_dataset/ is versioned: the final benchmark dataset (programs + metadata)
 dataset_manager/raw_cpp/**
 !dataset_manager/raw_cpp/.gitkeep
-dataset_manager/benchmark_dataset/**
-!dataset_manager/benchmark_dataset/.gitkeep
 dataset_manager/reports/**
 !dataset_manager/reports/.gitkeep
 dataset_manager/logs/**
